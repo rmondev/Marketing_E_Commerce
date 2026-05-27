@@ -1,0 +1,32 @@
+{
+  "name": "analytics-audit",
+  "version": "0.1.0",
+  "description": "Weekly engagement snapshot and reporting tool for Instagram Business accounts",
+  "private": true,
+  "type": "module",
+  "author": "Riccardo Moncada",
+  "license": "UNLICENSED",
+  "scripts": {
+    "audit": "tsx src/cli/audit.ts",
+    "client:add": "tsx src/cli/client-add.ts",
+    "client:list": "tsx src/cli/client-list.ts",
+    "token:refresh": "tsx src/cli/token-refresh.ts",
+    "report:monthly": "tsx src/cli/report-monthly.ts",
+    "dev": "tsx watch src/cli/audit.ts -- --client rmondev",
+    "test:instagram": "tsx src/api/instagram.live-test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "commander": "^14.0.3",
+    "date-fns": "^4.3.0",
+    "dotenv": "^17.4.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3"
+  }
+}

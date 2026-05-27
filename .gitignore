@@ -1,0 +1,13 @@
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+*.swp
+.vscode/
+.idea/
+
+# Local env files at this level (none expected, but a safety net)
+.env
+.env.local
+.env.*.local
