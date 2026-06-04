@@ -91,6 +91,7 @@ npm run audit -- --client rmondev --lookback-days 365
 | `src/db/schema.sql` | Schema applied idempotently on every DB connection. |
 | `.env.local` | Credentials (gitignored). `.env.example` is the committed template. |
 | `docs/OPERATIONS.md` | Operator runbook — weekly workflow, token refresh, onboarding, debugging. |
+| `docs/NEW_CLIENT_ONBOARDING.md` | Step-by-step walkthrough for adding a new client (Graph Explorer UI flow). |
 | `CONTEXT.md` | Purpose statement + non-goals. The *why* and the deliberate boundaries. |
 
 ## Common errors
@@ -136,6 +137,7 @@ AnalyticsAudit/
 ├── data/                           # SQLite (gitignored)
 ├── reports/                        # Generated Markdown (gitignored)
 ├── docs/OPERATIONS.md              # Operator runbook
+├── docs/NEW_CLIENT_ONBOARDING.md   # Step-by-step new-client walkthrough
 ├── .env.example                    # Committed template
 ├── .env.local                      # Credentials (gitignored)
 └── CONTEXT.md                      # Purpose & non-goals

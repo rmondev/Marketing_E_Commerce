@@ -131,6 +131,8 @@ Page Tokens derived from long-lived User Tokens have no explicit expiration (`ex
 
 ## New client onboarding (end-to-end)
 
+> For a step-by-step Graph Explorer walkthrough (with screenshots-equivalent UI guidance and response shapes), see [NEW_CLIENT_ONBOARDING.md](NEW_CLIENT_ONBOARDING.md). The section below is the condensed reference once the flow is familiar.
+
 ### Gather
 
 - Facebook Page ID (numeric)
