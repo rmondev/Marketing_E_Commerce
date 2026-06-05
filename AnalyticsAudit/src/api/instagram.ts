@@ -2,12 +2,16 @@ import {
   accountInsightsResponseSchema,
   accountProfileSchema,
   apiErrorEnvelopeSchema,
+  AUDIENCE_TYPE_CONFIG,
   debugTokenResponseSchema,
+  demographicInsightsResponseSchema,
   mediaInsightsResponseSchema,
   mediaListResponseSchema,
   METRICS_BY_TYPE,
   pageAccessTokenResponseSchema,
   tokenExchangeResponseSchema,
+  type AudienceType,
+  type DemographicDimension,
   type MediaItem,
   type MediaType,
 } from "../types/instagram.js";
@@ -189,6 +193,55 @@ export async function debugToken(
     type: parsed.data.type,
     expires_at: parsed.data.expires_at,
   };
+}
+
+// Returns a bucket-key → count map for one (audience type × breakdown
+// dimension) pair. Single call per dimension — Meta does not return multiple
+// breakdowns in one request. Returns null on Graph errors (most commonly: the
+// account has <100 followers, Meta's privacy threshold for demographics), so
+// the audit captures whatever subset Meta will release without failing.
+export async function getAudienceDemographics(
+  igAccountId: string,
+  audienceType: AudienceType,
+  breakdown: DemographicDimension,
+  token: string,
+): Promise<Record<string, number> | null> {
+  const config = AUDIENCE_TYPE_CONFIG[audienceType];
+  const params: Record<string, string> = {
+    metric: config.metric,
+    period: "lifetime",
+    metric_type: "total_value",
+    breakdown,
+    access_token: token,
+  };
+  // engaged_audience_demographics requires a timeframe (Meta rejects with
+  // code 100 otherwise). follower_demographics does not accept one.
+  if (config.timeframe !== undefined) params["timeframe"] = config.timeframe;
+  const url = buildUrl(`/${igAccountId}/insights`, params);
+  try {
+    const raw = await requestJson(url);
+    const parsed = demographicInsightsResponseSchema.parse(raw);
+    const entry = parsed.data[0];
+    if (!entry) return null;
+    const breakdownData = entry.total_value.breakdowns[0];
+    if (!breakdownData) return null;
+    const out: Record<string, number> = {};
+    for (const r of breakdownData.results) {
+      // Single-dim breakdowns return one value in dimension_values.
+      const key = r.dimension_values[0] ?? "(unknown)";
+      out[key] = r.value;
+    }
+    return out;
+  } catch (err) {
+    if (err instanceof InstagramApiError) {
+      console.warn(
+        `  [${audienceType}_demographics × ${breakdown}] skipped: ${err.message}` +
+          (err.apiCode !== undefined ? ` (code ${err.apiCode})` : ""),
+      );
+      return null;
+    }
+    throw err;
+  }
 }
 
 // Returns a metric-name → value map for a single media item. Callers must

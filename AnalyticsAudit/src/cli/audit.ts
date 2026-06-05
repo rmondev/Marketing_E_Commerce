@@ -2,6 +2,7 @@ import { Command } from "commander";
 import {
   getAccountInsights,
   getAccountProfile,
+  getAudienceDemographics,
   getMediaInsights,
   listRecentMedia,
 } from "../api/instagram.js";
@@ -9,7 +10,11 @@ import { db } from "../db/client.js";
 import { toEtTimestamp } from "../lib/time.js";
 import { generateReport } from "../reports/generator.js";
 import {
+  AUDIENCE_TYPES,
+  DEMOGRAPHIC_DIMENSIONS,
   resolveMediaType,
+  type AudienceType,
+  type DemographicDimension,
   type MediaItem,
   type MediaType,
 } from "../types/instagram.js";
@@ -25,6 +30,12 @@ const ACCOUNT_INSIGHTS_WINDOW_DAYS = 7;
 // metrics.
 const DEFAULT_LOOKBACK_DAYS = 7;
 const MAX_POSTS_TO_SCAN = 50;
+
+// The Posts section of the rolling report always shows at most this many
+// posts. When the lookback window contains fewer than this, the audit pulls
+// the most recent posts from outside the window to fill — those rows are
+// flagged is_supplemental=1 so the report can mark them visually.
+const POSTS_PER_REPORT = 5;
 
 const program = new Command();
 program
@@ -130,35 +141,79 @@ const allMedia = await listRecentMedia(
   client.page_access_token,
   MAX_POSTS_TO_SCAN,
 );
-const recentMedia = allMedia.filter(
+// Sort newest-first so the supplemental fill picks the most recent
+// out-of-window posts. Meta's /media endpoint already returns newest-first,
+// but we do not want capture correctness to depend on that.
+const sortedMedia = [...allMedia].sort(
+  (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+);
+const inWindow = sortedMedia.filter(
   (m) => new Date(m.timestamp) >= mediaSinceDate,
 );
+const outOfWindow = sortedMedia.filter(
+  (m) => new Date(m.timestamp) < mediaSinceDate,
+);
+const supplementalNeeded = Math.max(0, POSTS_PER_REPORT - inWindow.length);
+const supplemental = outOfWindow.slice(0, supplementalNeeded);
 console.log(
-  `  ${allMedia.length} returned, ${recentMedia.length} within last ${lookbackDays} days`,
+  `  ${allMedia.length} returned, ${inWindow.length} within last ${lookbackDays} days, ${supplemental.length} supplemental (to reach ${POSTS_PER_REPORT})`,
 );
 
 type MediaWithInsights = {
   item: MediaItem;
   kind: MediaType;
   insights: Record<string, number> | null;
+  isSupplemental: boolean;
 };
 const mediaWithInsights: MediaWithInsights[] = [];
-if (recentMedia.length > 0) console.log("\nFetching per-media insights...");
-for (const item of recentMedia) {
+const mediaToCapture: { item: MediaItem; isSupplemental: boolean }[] = [
+  ...inWindow.map((item) => ({ item, isSupplemental: false })),
+  ...supplemental.map((item) => ({ item, isSupplemental: true })),
+];
+if (mediaToCapture.length > 0) console.log("\nFetching per-media insights...");
+for (const { item, isSupplemental } of mediaToCapture) {
   const kind = resolveMediaType(item);
   const insights = await getMediaInsights(
     item.id,
     kind,
     client.page_access_token,
   );
-  mediaWithInsights.push({ item, kind, insights });
+  mediaWithInsights.push({ item, kind, insights, isSupplemental });
 }
 const withInsightsCount = mediaWithInsights.filter(
   (m) => m.insights !== null,
 ).length;
 
+console.log("\nFetching audience demographics...");
+type DemographicCapture = {
+  audienceType: AudienceType;
+  dimension: DemographicDimension;
+  buckets: Record<string, number>;
+};
+const demographicCaptures: DemographicCapture[] = [];
+for (const audienceType of AUDIENCE_TYPES) {
+  for (const dimension of DEMOGRAPHIC_DIMENSIONS) {
+    const buckets = await getAudienceDemographics(
+      client.ig_business_account_id,
+      audienceType,
+      dimension,
+      client.page_access_token,
+    );
+    if (buckets !== null) {
+      demographicCaptures.push({ audienceType, dimension, buckets });
+    }
+  }
+}
+const demographicRowCount = demographicCaptures.reduce(
+  (sum, c) => sum + Object.keys(c.buckets).length,
+  0,
+);
+console.log(
+  `  ${demographicCaptures.length}/${AUDIENCE_TYPES.length * DEMOGRAPHIC_DIMENSIONS.length} breakdowns returned, ${demographicRowCount} bucket row(s)`,
+);
+
 const insertSnapshot = db.prepare(
-  "INSERT INTO snapshots (client_id, captured_at, notes) VALUES (?, ?, ?)",
+  "INSERT INTO snapshots (client_id, captured_at, lookback_days, demographics_attempted, notes) VALUES (?, ?, ?, ?, ?)",
 );
 const insertAccountMetrics = db.prepare(`
   INSERT INTO account_metrics (
@@ -169,12 +224,24 @@ const insertAccountMetrics = db.prepare(`
 const insertPostMetric = db.prepare(`
   INSERT INTO post_metrics (
     snapshot_id, ig_media_id, media_type, caption, permalink, published_at,
-    like_count, comments_count, reach, saved, shares, video_views
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    like_count, comments_count, reach, saved, shares, video_views,
+    is_supplemental
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const insertDemographicBreakdown = db.prepare(`
+  INSERT INTO demographic_breakdowns (
+    snapshot_id, audience_type, dimension, bucket, value
+  ) VALUES (?, ?, ?, ?, ?)
 `);
 
 const persist = db.transaction((): number => {
-  const snapResult = insertSnapshot.run(client.id, now.toISOString(), null);
+  const snapResult = insertSnapshot.run(
+    client.id,
+    now.toISOString(),
+    lookbackDays,
+    1, // demographics_attempted — this build always tries the 2x4 grid above
+    null,
+  );
   const snapshotId = Number(snapResult.lastInsertRowid);
 
   insertAccountMetrics.run(
@@ -187,12 +254,14 @@ const persist = db.transaction((): number => {
     null, // website_clicks not fetched in v0
   );
 
-  for (const { item, kind, insights } of mediaWithInsights) {
+  for (const { item, kind, insights, isSupplemental } of mediaWithInsights) {
     insertPostMetric.run(
       snapshotId,
       item.id,
       kind,
-      item.caption ? item.caption.slice(0, 500) : null,
+      // Full caption stored — reports extract hashtags from it; Instagram
+      // captions cap at 2,200 chars which is well within SQLite TEXT limits.
+      item.caption,
       item.permalink,
       item.timestamp,
       item.like_count,
@@ -203,18 +272,37 @@ const persist = db.transaction((): number => {
       // Graph v25 returns the metric as "views"; we keep the schema column
       // name "video_views" to match the original brief.
       insights?.views ?? null,
+      isSupplemental ? 1 : 0,
     );
+  }
+
+  for (const { audienceType, dimension, buckets } of demographicCaptures) {
+    for (const [bucket, value] of Object.entries(buckets)) {
+      insertDemographicBreakdown.run(
+        snapshotId,
+        audienceType,
+        dimension,
+        bucket,
+        value,
+      );
+    }
   }
 
   return snapshotId;
 });
 
 const snapshotId = persist();
+const supplementalCount = mediaWithInsights.filter(
+  (m) => m.isSupplemental,
+).length;
 
 console.log(`\nSnapshot saved (id=${snapshotId}) at ${toEtTimestamp(now.toISOString())}`);
-console.log("  account_metrics: 1 row");
+console.log("  account_metrics:         1 row");
 console.log(
-  `  post_metrics:    ${mediaWithInsights.length} row(s) (${withInsightsCount} with insights, ${mediaWithInsights.length - withInsightsCount} without)`,
+  `  post_metrics:            ${mediaWithInsights.length} row(s) (${withInsightsCount} with insights, ${mediaWithInsights.length - withInsightsCount} without, ${supplementalCount} supplemental)`,
+);
+console.log(
+  `  demographic_breakdowns:  ${demographicRowCount} row(s) across ${demographicCaptures.length} breakdown(s)`,
 );
 
 const { rollingPath, archivePath } = generateReport({
