@@ -18,6 +18,7 @@ export function toEtDate(iso: string): string {
 }
 
 // Returns "YYYY-MM-DD HH:MM:SS TZN" (e.g. "2026-05-26 17:46:38 EDT").
+// Used in compact contexts (footer, audit console output).
 export function toEtTimestamp(iso: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: TZ,
@@ -33,4 +34,57 @@ export function toEtTimestamp(iso: string): string {
   const get = (type: string): string =>
     parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")} ${get("timeZoneName")}`;
+}
+
+// Returns "Monday June 5, 2026 1:26 PM EDT" — readable format used in report
+// headers and per-snapshot "Captured" lines. No commas (after weekday), no
+// "at" — assembled from Intl parts to match the requested format exactly.
+export function toReadableEtTimestamp(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  }).formatToParts(new Date(iso));
+  const get = (type: string): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("weekday")} ${get("month")} ${get("day")}, ${get("year")} ${get("hour")}:${get("minute")} ${get("dayPeriod")} ${get("timeZoneName")}`;
+}
+
+// Returns "Jun 5, 2026 1:30 PM" — compact form for table cells where the
+// full readable timestamp would be too wide. No weekday, no timezone (the
+// timezone is consistent across the report so callers don't need to repeat).
+export function toShortReadableEt(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).formatToParts(new Date(iso));
+  const get = (type: string): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("month")} ${get("day")}, ${get("year")} ${get("hour")}:${get("minute")} ${get("dayPeriod")}`;
+}
+
+// Returns "Monday June 5, 2026" — readable date-only form for per-snapshot
+// section headings where time-of-day is shown separately on the next line.
+export function toReadableEtDate(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).formatToParts(new Date(iso));
+  const get = (type: string): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("weekday")} ${get("month")} ${get("day")}, ${get("year")}`;
 }
