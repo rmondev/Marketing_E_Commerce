@@ -29,7 +29,7 @@ Both report files are rebuilt from SQLite on every audit run. Re-running the sam
 
 - `reports/<short-name>.md` — rolling report, last 12 snapshots, newest first.
 - `reports/<short-name>_archive.md` — everything older than the rolling window. Created on the first audit that produces a 13th snapshot.
-- `reports/<short-name>_monthly.html` — HTML monthly comparison with Chart.js visualisations. Built by `npm run report:monthly`, not by the audit.
+- `reports/<short-name>_trend.html` — HTML trend report with Chart.js visualisations (KPI sparklines, audience donuts, post evolution). Built by `npm run report:trend`, not by the audit.
 
 ### Section header (per snapshot)
 
@@ -67,21 +67,23 @@ Change column conventions:
 
 If the lookback window contains no posts, the table is omitted entirely (just the count summary appears).
 
-## Monthly HTML report
+## HTML trend report
 
 ```powershell
-npm run report:monthly -- --client <short-name>
+npm run report:trend -- --client <short-name>
 ```
 
-Renders `reports/<short-name>_monthly.html` from the last 4 snapshots already stored in SQLite. Does not hit the Graph API. Open the file in a browser; charts are rendered by Chart.js loaded from a CDN, so an internet connection is needed the first time.
+Renders `reports/<short-name>_trend.html` from snapshots already stored in SQLite. Does not hit the Graph API. Open the file in a browser; charts are rendered by Chart.js loaded from a CDN, so an internet connection is needed the first time.
+
+Headline comparison is the **latest snapshot vs the one before it**. The last 4 snapshots provide trend context.
 
 What's in the HTML:
-- **Line chart** — followers / following / total media across the 4 snapshots
-- **Line chart** — reach + profile views (rolling 7d) across the 4 snapshots
-- **Bar chart** — likes per post per snapshot (one bar group per snapshot, one dataset per media item). Omitted if no posts appear in any of the 4 snapshots.
-- **Table** — the underlying numbers
+- **Account KPI cards** — followers, following, total media, reach (7d), profile views (7d). Each card shows: current value, delta + %change vs prior snapshot, and a sparkline across the 4-snapshot window.
+- **Audience donuts** — pie/donut charts for follower demographics (age, gender, top countries, top cities) and engaged-audience demographics. Country and city use a top-5 + "Other" rollup because Meta returns ~45 buckets each. Engaged demographics often show an empty-state message — Meta only releases breakdowns when there are ≥~100 unique engagers in the timeframe.
+- **Posts table** — the latest snapshot's posts, with `†` markers for supplemental posts (pulled in from before the lookback window so the table is never empty) and a "no insights" note for media that pre-dates the Business conversion.
+- **Likes per post chart** — line chart, each unique post seen across the window is a series, showing how its like count evolved snapshot-by-snapshot. Omitted if the window has fewer than 2 snapshots or no posts were tracked.
 
-Current snapshot-selection rule: `LIMIT 4 ORDER BY id DESC` — the most recent 4 snapshots regardless of when they were captured. This is the testing-phase model; it will switch to calendar-month + ISO-week selection later.
+Window-selection rule: `LIMIT 4 ORDER BY id DESC` — the most recent 4 snapshots regardless of when they were captured. With fewer than 2, comparisons and trends gracefully degrade ("trend needs ≥2 snapshots", "no prior snapshot yet — comparisons unavailable").
 
 ## Refreshing an expired Page Access Token
 

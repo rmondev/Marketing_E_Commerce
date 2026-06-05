@@ -58,15 +58,13 @@ Tabular list of every configured client with the timestamp of its last snapshot.
 
 Refresh an expired (or about-to-expire) Page Access Token. Exchanges a short-lived User Token from the Graph API Explorer for a long-lived Page Token and stores it on the client. Prompts for the client and the user token if not passed via flags. See [docs/OPERATIONS.md#refreshing-an-expired-page-access-token](docs/OPERATIONS.md#refreshing-an-expired-page-access-token).
 
-### `npm run report:monthly -- --client <short-name>`
+### `npm run report:trend -- --client <short-name>`
 
-Renders an HTML monthly comparison report from the last 4 snapshots already stored in SQLite. Does not hit the API. Output is `reports/<short-name>_monthly.html` — open it in a browser. Charts are powered by Chart.js loaded from a CDN, so an internet connection is needed the first time you open the file.
+Renders an HTML trend report from snapshots already stored in SQLite. Does not hit the API. Headline comparison is the latest snapshot vs the one before it; the last 4 snapshots provide trend context (per-metric sparklines, per-post likes evolution). Audience demographics render as donut charts. Output is `reports/<short-name>_trend.html` — open it in a browser. Charts are powered by Chart.js loaded from a CDN, so an internet connection is needed the first time you open the file.
 
 ```powershell
-npm run report:monthly -- --client rmondev
+npm run report:trend -- --client rmondev
 ```
-
-This is the testing-phase windowing model (most recent 4 snapshots regardless of date). It will move to calendar-month + ISO-week selection later.
 
 ### `npm run audit -- --client <short-name>`
 
@@ -87,7 +85,7 @@ npm run audit -- --client rmondev --lookback-days 365
 | `data/analytics.db` | SQLite database (gitignored). Auto-initialized on first run. |
 | `reports/<short-name>.md` | Rolling report (gitignored). Regenerated from SQLite on every audit run. Contains the last 12 snapshots, newest first. |
 | `reports/<short-name>_archive.md` | Snapshots older than the rolling window (gitignored). Created on the first run that produces a 13th snapshot. |
-| `reports/<short-name>_monthly.html` | Monthly HTML comparison report (gitignored). Overwritten by each `report:monthly` run. |
+| `reports/<short-name>_trend.html` | HTML trend report (gitignored). Overwritten by each `report:trend` run. |
 | `src/db/schema.sql` | Schema applied idempotently on every DB connection. |
 | `.env.local` | Credentials (gitignored). `.env.example` is the committed template. |
 | `docs/OPERATIONS.md` | Operator runbook — weekly workflow, token refresh, onboarding, debugging. |
@@ -126,13 +124,13 @@ AnalyticsAudit/
 │   ├── cli/audit.ts                # Primary command — fetch, persist, report
 │   ├── cli/client-add.ts           # Interactive client onboarding
 │   ├── cli/client-list.ts          # Tabular list
-│   ├── cli/report-monthly.ts       # Render monthly HTML report from existing snapshots
+│   ├── cli/report-trend.ts         # Render HTML trend report from existing snapshots
 │   ├── db/client.ts                # better-sqlite3 connection + schema init
 │   ├── db/schema.sql               # Applied idempotently per connection
 │   ├── lib/env.ts                  # dotenv + zod env validation
 │   ├── lib/time.ts                 # UTC → ET presentation helpers
 │   ├── reports/generator.ts        # Markdown rolling-report builder
-│   ├── reports/monthly-generator.ts # HTML monthly comparison builder (Chart.js)
+│   ├── reports/trend-generator.ts  # HTML trend report builder (Chart.js, donuts, sparklines)
 │   └── types/instagram.ts          # zod response schemas + MediaType + METRICS_BY_TYPE
 ├── data/                           # SQLite (gitignored)
 ├── reports/                        # Generated Markdown (gitignored)

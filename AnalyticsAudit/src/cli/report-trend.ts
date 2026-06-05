@@ -1,12 +1,12 @@
 import { Command } from "commander";
 import { db } from "../db/client.js";
-import { generateMonthlyReport } from "../reports/monthly-generator.js";
+import { generateTrendReport } from "../reports/trend-generator.js";
 
 const program = new Command();
 program
-  .name("report:monthly")
+  .name("report:trend")
   .description(
-    "Render an HTML monthly comparison report (last 4 snapshots) for one client.",
+    "Render an HTML trend report (latest snapshot vs the one before, with 4-snapshot context) for one client.",
   )
   .requiredOption(
     "--client <shortName>",
@@ -34,11 +34,11 @@ if (!client) {
   process.exit(1);
 }
 
-const reportPath = generateMonthlyReport(client);
+const reportPath = generateTrendReport(client);
 if (!reportPath) {
   console.error(
     `No snapshots for client '${shortName}'. Run 'npm run audit -- --client ${shortName}' first.`,
   );
   process.exit(1);
 }
-console.log(`Monthly report: ${reportPath}`);
+console.log(`Trend report: ${reportPath}`);

@@ -11,7 +11,7 @@
     "client:add": "tsx src/cli/client-add.ts",
     "client:list": "tsx src/cli/client-list.ts",
     "token:refresh": "tsx src/cli/token-refresh.ts",
-    "report:monthly": "tsx src/cli/report-monthly.ts",
+    "report:trend": "tsx src/cli/report-trend.ts",
     "dev": "tsx watch src/cli/audit.ts -- --client rmondev",
     "test:instagram": "tsx src/api/instagram.live-test.ts",
     "typecheck": "tsc --noEmit"
