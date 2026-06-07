@@ -88,3 +88,17 @@ export function toReadableEtDate(iso: string): string {
     parts.find((p) => p.type === type)?.value ?? "";
   return `${get("weekday")} ${get("month")} ${get("day")}, ${get("year")}`;
 }
+
+// Returns "June 5, 2026" — long month, no weekday, no time. Used where the
+// weekday-prefixed form is too verbose (chart axis labels, etc.).
+export function toLongDateEt(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).formatToParts(new Date(iso));
+  const get = (type: string): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("month")} ${get("day")}, ${get("year")}`;
+}

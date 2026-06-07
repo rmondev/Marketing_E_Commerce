@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { db } from "../db/client.js";
 import {
   toEtTimestamp,
+  toLongDateEt,
   toReadableEtTimestamp,
   toShortReadableEt,
 } from "../lib/time.js";
@@ -234,9 +235,13 @@ function renderHtml(input: RenderInput): string {
   } = input;
 
   const chronological = [...snapshots].reverse();
-  const chronoLabels = chronological.map(
-    (s) => `#${s.id} · ${toShortReadableEt(s.captured_at).split(" 20")[0]}…`,
-  );
+  // Multi-line chart x-axis labels: Chart.js renders each array element on
+  // its own line. Top line is the snapshot identifier, bottom line is the
+  // capture date in long form ("June 5, 2026").
+  const chronoLabels: string[][] = chronological.map((s) => [
+    `Snapshot #${s.id}`,
+    `- ${toLongDateEt(s.captured_at)} -`,
+  ]);
 
   const kpiCards = ACCOUNT_METRICS.map((m) =>
     renderKpiCard(m, input),
@@ -390,6 +395,16 @@ function renderHtml(input: RenderInput): string {
   .hashtag-empty { color: var(--muted); }
 
   .posts-evolution-wrap { height: 380px; margin-top: 1.5rem; position: relative; }
+  .posts-evolution-legend { list-style: none; padding: 0;
+                            margin: 0.5rem 0 0;
+                            display: grid;
+                            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                            gap: 0.35rem 1.25rem; font-size: 0.88rem; }
+  .posts-evolution-legend li { display: flex; align-items: center; gap: 0.55rem; }
+  .posts-evolution-legend .evolution-swatch { width: 14px; height: 14px;
+                                              border-radius: 3px; flex-shrink: 0; }
+  .posts-evolution-legend .evolution-date { color: var(--muted);
+                                            font-variant-numeric: tabular-nums; }
   footer { margin-top: 3rem; color: var(--muted); font-size: 0.85rem;
            border-top: 1px solid var(--border); padding-top: 1rem; }
 </style>
@@ -494,7 +509,9 @@ if (postsEvolution) {
       options: {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "nearest", intersect: false },
-        plugins: { legend: { position: "right", labels: { boxWidth: 12, font: { size: 11 } } } },
+        // Built-in legend hidden; we render a custom HTML legend below the
+        // canvas with clickable "view" links to each post's permalink.
+        plugins: { legend: { display: false } },
         scales: { y: { beginAtZero: true } },
       },
     });
@@ -763,15 +780,21 @@ function renderAudienceBlock(
 
 type PostsEvolutionData = {
   id: string;
-  labels: string[];
+  // Each label is an array of strings — Chart.js stacks them as separate
+  // lines on the x-axis.
+  labels: string[][];
   datasets: Array<{ label: string; data: (number | null)[] }>;
+  // Custom HTML legend rendered below the canvas. Each item maps 1:1 to a
+  // dataset (same order, same color index) and carries the post permalink
+  // so the legend doubles as a "view this post" jump list.
+  legendItems: Array<{ label: string; permalink: string }>;
 } | null;
 
 function renderPostsSection(
   latestPosts: PostRow[],
   allWindowPosts: PostRow[],
   chronological: Snapshot[],
-  chronoLabels: string[],
+  chronoLabels: string[][],
 ): { html: string; chartData: PostsEvolutionData } {
   if (latestPosts.length === 0) {
     return {
@@ -869,23 +892,61 @@ function renderPostsSection(
   </div>
   ${footnote}`;
 
+  // Per-post supplemental flag from the *latest* snapshot. A post in the
+  // chart is "currently outside the 7-day window" if either:
+  //   (a) it's in the latest snapshot with is_supplemental=1, or
+  //   (b) it's no longer in the latest snapshot at all (older than the
+  //       window AND past the top-50 media cap).
+  const supplementalById = new Map<string, boolean>(
+    latestPosts.map((p) => [p.ig_media_id, p.is_supplemental === 1]),
+  );
+  const isSupplementalNow = (mediaId: string): boolean =>
+    supplementalById.get(mediaId) ?? true;
+
   let chartData: PostsEvolutionData = null;
   let chartHtml = "";
   if (chronological.length >= 2) {
     const byPost = groupPostsByMedia(allWindowPosts, chronological);
     if (byPost.length > 0) {
+      const seriesLabels = byPost.map((p) => {
+        const marker = isSupplementalNow(p.igMediaId) ? "† " : "";
+        return `${marker}${toShortReadableEt(p.publishedAt)}`;
+      });
       chartData = {
         id: "posts_evolution",
         labels: chronoLabels,
-        datasets: byPost.map((p) => ({
-          label: `${toShortReadableEt(p.publishedAt)} · ${p.shortId}`,
+        datasets: byPost.map((p, i) => ({
+          label: seriesLabels[i]!,
           data: p.likesPerSnapshot,
         })),
+        legendItems: byPost.map((p, i) => ({
+          label: seriesLabels[i]!,
+          permalink: p.permalink,
+        })),
       };
+      const legendHtml = chartData.legendItems
+        .map(
+          (item, i) => `
+        <li>
+          <span class="evolution-swatch" style="background:${POST_PALETTE[i % POST_PALETTE.length]}"></span>
+          <span class="evolution-date">${escapeHtml(item.label)}</span>
+          <a href="${escapeHtml(item.permalink)}" target="_blank" rel="noopener">view</a>
+        </li>`,
+        )
+        .join("");
+      const supplementalCount = byPost.filter((p) =>
+        isSupplementalNow(p.igMediaId),
+      ).length;
+      const supplementalNote =
+        supplementalCount > 0
+          ? ` Posts marked <strong>†</strong> were published before the current 7-day window — included so the chart isn't empty when no recent posts exist.`
+          : "";
       chartHtml = `
   <h3>Likes Per Post Across Window</h3>
-  <p class="section-intro">Each line is one post; the dots are its like count at each snapshot. Reveals which posts kept earning likes after publication.</p>
-  <div class="posts-evolution-wrap"><canvas id="posts_evolution"></canvas></div>`;
+  <p class="section-intro">Each line is one post; the dots are its like count at each snapshot. Reveals which posts kept earning likes after publication.${supplementalNote}</p>
+  <div class="posts-evolution-wrap"><canvas id="posts_evolution"></canvas></div>
+  <ul class="posts-evolution-legend">${legendHtml}
+  </ul>`;
     } else {
       chartHtml = `<div class="empty-state">No tracked posts across the window — evolution chart unavailable.</div>`;
     }
@@ -933,8 +994,8 @@ function renderHashtagsCell(caption: string | null): string {
 
 type MediaSeries = {
   igMediaId: string;
-  shortId: string;
   publishedAt: string;
+  permalink: string;
   likesPerSnapshot: (number | null)[];
 };
 
@@ -963,16 +1024,12 @@ function groupPostsByMedia(
     )
     .map((entry) => ({
       igMediaId: entry.post.ig_media_id,
-      shortId: shortenMediaId(entry.post.ig_media_id),
       publishedAt: entry.post.published_at,
+      permalink: entry.post.permalink,
       likesPerSnapshot: orderedIds.map(
         (sid) => entry.bySnap.get(sid) ?? null,
       ),
     }));
-}
-
-function shortenMediaId(id: string): string {
-  return id.length > 10 ? `${id.slice(0, 6)}…${id.slice(-3)}` : id;
 }
 
 function formatNullable(n: number | null): string {
