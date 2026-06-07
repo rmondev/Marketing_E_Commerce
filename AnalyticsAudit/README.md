@@ -1,8 +1,8 @@
 # AnalyticsAudit
 
-A local CLI for capturing weekly Instagram Business engagement snapshots and maintaining a rolling Markdown report per client.
+A local CLI for capturing weekly Instagram Business engagement snapshots and maintaining a rolling Markdown report plus an HTML trend report per client.
 
-The audit pipeline pulls profile, account-level, and per-post metrics from the Instagram Graph API, stores each snapshot in a local SQLite database, and regenerates a Markdown report containing the last 12 snapshots (newest first), with each section also showing the delta against the snapshot before it. Older snapshots fall through to a per-client archive file. Run it weekly to build a longitudinal engagement record that survives Instagram UI changes and becomes case-study material for client work.
+The audit pipeline pulls profile, account-level, per-post, and audience-demographic metrics from the Instagram Graph API, stores each snapshot in a local SQLite database, and regenerates a Markdown rolling report containing the last 12 snapshots (newest first), with each section showing the delta against the snapshot before it. Older snapshots fall through to a per-client archive file. A separate `report:trend` command renders an HTML view with KPI cards, audience donut charts, a sortable posts table, and a likes-per-post-across-window line chart. Run the audit weekly to build a longitudinal engagement record that survives Instagram UI changes and becomes case-study material for client work.
 
 v0 is a local single-user CLI. Supports multiple clients from day one. No web UI, no scheduling, no in-app OAuth.
 
@@ -78,6 +78,26 @@ npm run audit -- --client rmondev
 npm run audit -- --client rmondev --lookback-days 365
 ```
 
+### `npm run db:clear`
+
+Wipe the local analytics database. **Dry-run by default** — printing what would be deleted and exiting. Three opt-in modes, in increasing order of damage:
+
+```powershell
+# Preview only — no changes
+npm run db:clear
+
+# Wipe snapshot history (snapshots / account_metrics / post_metrics / demographic_breakdowns). Clients and tokens preserved.
+npm run db:clear -- --confirm
+
+# Wipe everything including clients. Prompts you to type 'DELETE' (uppercase) before proceeding.
+npm run db:clear -- --confirm --include-clients
+
+# Same as above but skips the prompt — for scripts only.
+npm run db:clear -- --confirm --include-clients --force
+```
+
+A timestamped backup of `data/analytics.db` is written before any deletion (`data/analytics.backup.YYYYMMDD-HHMMSS.db`). Pass `--no-backup` to skip if you've already taken one.
+
 ## Where things live
 
 | Path | Purpose |
@@ -125,12 +145,14 @@ AnalyticsAudit/
 │   ├── cli/client-add.ts           # Interactive client onboarding
 │   ├── cli/client-list.ts          # Tabular list
 │   ├── cli/report-trend.ts         # Render HTML trend report from existing snapshots
+│   ├── cli/db-clear.ts             # Wipe DB (dry-run by default, prompts for destructive ops)
 │   ├── db/client.ts                # better-sqlite3 connection + schema init
 │   ├── db/schema.sql               # Applied idempotently per connection
 │   ├── lib/env.ts                  # dotenv + zod env validation
 │   ├── lib/time.ts                 # UTC → ET presentation helpers
 │   ├── reports/generator.ts        # Markdown rolling-report builder
 │   ├── reports/trend-generator.ts  # HTML trend report builder (Chart.js, donuts, sparklines)
+│   ├── reports/_shared.ts          # Cross-generator helpers (hashtag extraction, country/gender expansion, ER, top-N rollup)
 │   └── types/instagram.ts          # zod response schemas + MediaType + METRICS_BY_TYPE
 ├── data/                           # SQLite (gitignored)
 ├── reports/                        # Generated Markdown (gitignored)

@@ -9,7 +9,7 @@ export const DEMOGRAPHIC_DIMENSIONS_ORDER = [
   "country",
   "city",
 ] as const;
-export type DimensionName = (typeof DEMOGRAPHIC_DIMENSIONS_ORDER)[number];
+type DimensionName = (typeof DEMOGRAPHIC_DIMENSIONS_ORDER)[number];
 
 export const DEMOGRAPHIC_TOP_N = 5;
 export const CAPTION_PREVIEW_CHARS = 30;
@@ -23,7 +23,7 @@ export function expandBucketLabel(dimension: string, raw: string): string {
   return raw;
 }
 
-export function expandGender(raw: string): string {
+function expandGender(raw: string): string {
   switch (raw.toUpperCase()) {
     case "F":
       return "Female";
@@ -36,7 +36,7 @@ export function expandGender(raw: string): string {
   }
 }
 
-export function expandCountry(code: string): string {
+function expandCountry(code: string): string {
   try {
     return COUNTRY_DISPLAY.of(code.toUpperCase()) ?? code;
   } catch {

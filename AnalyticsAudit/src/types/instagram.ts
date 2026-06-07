@@ -4,7 +4,7 @@ import { z } from "zod";
 // `post_metrics.media_type` column. Distinct from Graph's raw `media_type`
 // field (which only returns IMAGE/VIDEO/CAROUSEL_ALBUM — Reels come back as
 // VIDEO with `media_product_type=REELS`). Always derive via resolveMediaType.
-export const mediaTypeSchema = z.enum(["IMAGE", "VIDEO", "CAROUSEL_ALBUM", "REELS"]);
+const mediaTypeSchema = z.enum(["IMAGE", "VIDEO", "CAROUSEL_ALBUM", "REELS"]);
 export type MediaType = z.infer<typeof mediaTypeSchema>;
 
 const rawMediaTypeSchema = z.enum(["IMAGE", "VIDEO", "CAROUSEL_ALBUM"]);
@@ -15,7 +15,6 @@ export const accountProfileSchema = z.object({
   follows_count: z.number().int().nonnegative(),
   media_count: z.number().int().nonnegative(),
 });
-export type AccountProfile = z.infer<typeof accountProfileSchema>;
 
 const accountMetricEntrySchema = z.object({
   name: z.string(),
@@ -25,7 +24,6 @@ const accountMetricEntrySchema = z.object({
 export const accountInsightsResponseSchema = z.object({
   data: z.array(accountMetricEntrySchema),
 });
-export type AccountInsightsResponse = z.infer<typeof accountInsightsResponseSchema>;
 
 export const mediaItemSchema = z.object({
   id: z.string(),
@@ -51,7 +49,6 @@ const mediaMetricEntrySchema = z.object({
 export const mediaInsightsResponseSchema = z.object({
   data: z.array(mediaMetricEntrySchema),
 });
-export type MediaInsightsResponse = z.infer<typeof mediaInsightsResponseSchema>;
 
 // Single source of truth for the Reels-vs-Video distinction. Graph returns
 // `media_type=VIDEO` for both feed videos and Reels; only `media_product_type`
@@ -144,9 +141,6 @@ const demographicEntrySchema = z.object({
 export const demographicInsightsResponseSchema = z.object({
   data: z.array(demographicEntrySchema),
 });
-export type DemographicInsightsResponse = z.infer<
-  typeof demographicInsightsResponseSchema
->;
 
 // Response shapes for token-management endpoints.
 export const tokenExchangeResponseSchema = z.object({
