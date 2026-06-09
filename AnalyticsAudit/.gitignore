@@ -10,8 +10,10 @@ dist/
 # App data and generated outputs
 data/*.db
 data/*.db-journal
-reports/*.md
-reports/*.html
+# Pre-Phase-C reports lived at the top of reports/; Phase C reports live
+# in reports/<client>/<platform>/... and reports/_legacy/. Everything under
+# reports/ is locally-generated, never tracked.
+reports/
 
 # Logs
 *.log

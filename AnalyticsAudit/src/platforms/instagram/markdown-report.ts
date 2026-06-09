@@ -6,6 +6,7 @@ import {
   toReadableEtTimestamp,
   toShortReadableEt,
 } from "../../core/lib/time.js";
+import { migrateLegacyOrphans } from "../../core/reports/catalog.js";
 import {
   CAPTION_PREVIEW_CHARS,
   DEMOGRAPHIC_DIMENSIONS_ORDER,
@@ -20,12 +21,13 @@ import {
   truncateCaption,
 } from "../../core/reports/_shared.js";
 
-// Identifies a (business + IG platform account) pair. Reports are still
-// rendered per-business-per-platform; once Phase C restructures reports/,
-// the file paths will be derived from (short_name + platform_account_id).
+// Identifies a (business + platform account) pair. Reports live at
+// reports/<short_name>/<platform>/...; the `platform` field is what drives
+// the second path segment.
 export type ClientRef = {
   client_id: number;
   platform_account_id: number;
+  platform: string;
   short_name: string;
   display_name: string;
 };
@@ -167,11 +169,21 @@ export function generateReport(client: ClientRef): GenerateReportResult {
     return renderSnapshotSection(snap, prior);
   });
 
-  mkdirSync(REPORTS_DIR, { recursive: true });
+  // Phase C layout: reports/<client>/<platform>/{rolling,archive}.md.
+  // Multi-platform-safe: a TikTok report won't collide with an IG one
+  // because they live in sibling directories. Before writing, sweep any
+  // pre-Phase-C orphan files at the top of reports/ into _legacy/.
+  migrateLegacyOrphans(REPORTS_DIR);
+  const platformDir = resolve(
+    REPORTS_DIR,
+    client.short_name,
+    client.platform,
+  );
+  mkdirSync(platformDir, { recursive: true });
 
   const generatedAtIso = new Date().toISOString();
 
-  const rollingPath = resolve(REPORTS_DIR, `${client.short_name}.md`);
+  const rollingPath = resolve(platformDir, "rolling.md");
   writeFileSync(
     rollingPath,
     renderRolling(
@@ -187,7 +199,7 @@ export function generateReport(client: ClientRef): GenerateReportResult {
 
   let archivePath: string | null = null;
   if (archiveSnapshots.length > 0) {
-    archivePath = resolve(REPORTS_DIR, `${client.short_name}_archive.md`);
+    archivePath = resolve(platformDir, "archive.md");
     writeFileSync(
       archivePath,
       renderArchive(client, sectionsArchive, generatedAtIso),
@@ -233,7 +245,7 @@ function renderRolling(
   } else {
     const tail =
       archivedCount > 0
-        ? ` Older entries (${archivedCount}) archived in \`${client.short_name}_archive.md\`.`
+        ? ` Older entries (${archivedCount}) archived in \`archive.md\`.`
         : "";
     lines.push(
       `*Rolling report — last ${sections.length} of the most recent ${ROLLING_WINDOW} snapshot(s).${tail}*`,
@@ -262,7 +274,7 @@ function renderArchive(
   lines.push(`**Generated On:** ${toReadableEtTimestamp(generatedAtIso)}`);
   lines.push("");
   lines.push(
-    `*Snapshots older than the most recent ${ROLLING_WINDOW}. See \`${client.short_name}.md\` for current.*`,
+    `*Snapshots older than the most recent ${ROLLING_WINDOW}. See \`rolling.md\` for current.*`,
   );
   lines.push("");
   lines.push(renderMetricsGlossary());

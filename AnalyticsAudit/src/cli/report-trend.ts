@@ -23,12 +23,13 @@ type ClientRow = {
   short_name: string;
   display_name: string;
   platform_account_id: number;
+  platform: string;
 };
 
 const client = db
   .prepare(
     `SELECT c.id AS client_id, c.short_name, c.display_name,
-            pa.id AS platform_account_id
+            pa.id AS platform_account_id, pa.platform
        FROM clients c
        JOIN platform_accounts pa ON pa.client_id = c.id
        WHERE c.short_name = ? AND pa.platform = 'instagram'`,
@@ -43,11 +44,12 @@ if (!client) {
   process.exit(1);
 }
 
-const reportPath = generateTrendReport(client);
-if (!reportPath) {
+const result = generateTrendReport(client);
+if (!result) {
   console.error(
     `No snapshots for client '${shortName}'. Run 'npm run audit -- --client ${shortName}' first.`,
   );
   process.exit(1);
 }
-console.log(`Trend report: ${reportPath}`);
+console.log(`Trend report: ${result.trendPath}`);
+console.log(`Catalog:      ${result.catalogPath}`);

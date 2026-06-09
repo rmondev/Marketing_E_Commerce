@@ -3,10 +3,16 @@ import { resolve } from "node:path";
 import { db } from "../../core/db/client.js";
 import {
   toEtTimestamp,
+  toFilenameSafeTimestampEt,
   toLongDateEt,
   toReadableEtTimestamp,
   toShortReadableEt,
 } from "../../core/lib/time.js";
+import {
+  generateCatalog,
+  migrateLegacyOrphans,
+  upsertManifestEntry,
+} from "../../core/reports/catalog.js";
 import type { ClientRef } from "./markdown-report.js";
 import {
   DEMOGRAPHIC_DIMENSIONS_ORDER,
@@ -204,7 +210,14 @@ const ACCOUNT_METRICS: MetricDef[] = [
 
 const REPORTS_DIR = resolve("reports");
 
-export function generateTrendReport(client: ClientRef): string | null {
+export type GenerateTrendResult = {
+  trendPath: string;
+  catalogPath: string;
+};
+
+export function generateTrendReport(
+  client: ClientRef,
+): GenerateTrendResult | null {
   const snapshots = db
     .prepare(
       `SELECT id, captured_at, demographics_attempted
@@ -275,10 +288,46 @@ export function generateTrendReport(client: ClientRef): string | null {
     demographicRows,
   });
 
-  mkdirSync(REPORTS_DIR, { recursive: true });
-  const filePath = resolve(REPORTS_DIR, `${client.short_name}_trend.html`);
-  writeFileSync(filePath, html, "utf-8");
-  return filePath;
+  // Phase C layout: timestamped HTML files in
+  // reports/<client>/<platform>/trend/, never overwriting prior runs.
+  // The catalog (index.html) is regenerated alongside each report and
+  // serves as the navigation entry point. Pre-Phase-C orphans at the top
+  // of reports/ are swept into _legacy/ on first run.
+  migrateLegacyOrphans(REPORTS_DIR);
+  const trendDir = resolve(
+    REPORTS_DIR,
+    client.short_name,
+    client.platform,
+    "trend",
+  );
+  mkdirSync(trendDir, { recursive: true });
+
+  const generatedAtIso = new Date().toISOString();
+  const filename = `${toFilenameSafeTimestampEt(generatedAtIso)}.html`;
+  const trendPath = resolve(trendDir, filename);
+  writeFileSync(trendPath, html, "utf-8");
+
+  // Update the per-directory manifest so the catalog knows about this run.
+  // captured_at comes from the latest snapshot — that's the data this
+  // report renders, even if generation happened later.
+  upsertManifestEntry(trendDir, {
+    filename,
+    generated_at: generatedAtIso,
+    snapshot_id: latest.id,
+    snapshot_captured_at: latest.captured_at,
+    lookback_days: 7, // IG audit always uses a 7-day window; will become per-platform when Phase D lands
+  });
+
+  const catalogPath = generateCatalog({
+    trendDir,
+    client: {
+      short_name: client.short_name,
+      display_name: client.display_name,
+    },
+    platform: client.platform,
+  });
+
+  return { trendPath, catalogPath };
 }
 
 type RenderInput = {

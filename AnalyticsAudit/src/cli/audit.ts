@@ -74,6 +74,7 @@ type ClientRow = {
   short_name: string;
   display_name: string;
   platform_account_id: number;
+  platform: string;
   external_account_id: string;
   credentials: string;
 };
@@ -85,7 +86,8 @@ type InstagramCredentials = {
 const client = db
   .prepare(
     `SELECT c.id AS client_id, c.short_name, c.display_name,
-            pa.id AS platform_account_id, pa.external_account_id, pa.credentials
+            pa.id AS platform_account_id, pa.platform,
+            pa.external_account_id, pa.credentials
        FROM clients c
        JOIN platform_accounts pa ON pa.client_id = c.id
        WHERE c.short_name = ? AND pa.platform = 'instagram'`,
@@ -327,6 +329,7 @@ console.log(
 const { rollingPath, archivePath } = generateReport({
   client_id: client.client_id,
   platform_account_id: client.platform_account_id,
+  platform: client.platform,
   short_name: client.short_name,
   display_name: client.display_name,
 });

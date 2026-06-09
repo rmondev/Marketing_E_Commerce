@@ -102,3 +102,23 @@ export function toLongDateEt(iso: string): string {
     parts.find((p) => p.type === type)?.value ?? "";
   return `${get("month")} ${get("day")}, ${get("year")}`;
 }
+
+// Returns "2026-06-09_091038-EDT" — filesystem-safe, sortable, timezone
+// explicit. Used for the trend-report HTML filenames so they can be sorted
+// lexically and remain unambiguous when reviewed out of context.
+export function toFilenameSafeTimestampEt(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  }).formatToParts(new Date(iso));
+  const get = (type: string): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")}_${get("hour")}${get("minute")}${get("second")}-${get("timeZoneName")}`;
+}
