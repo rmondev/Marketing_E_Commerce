@@ -106,7 +106,7 @@ A timestamped backup of `data/analytics.db` is written before any deletion (`dat
 | `reports/<short-name>.md` | Rolling report (gitignored). Regenerated from SQLite on every audit run. Contains the last 12 snapshots, newest first. |
 | `reports/<short-name>_archive.md` | Snapshots older than the rolling window (gitignored). Created on the first run that produces a 13th snapshot. |
 | `reports/<short-name>_trend.html` | HTML trend report (gitignored). Overwritten by each `report:trend` run. |
-| `src/db/schema.sql` | Schema applied idempotently on every DB connection. |
+| `src/core/db/schema.sql` | Schema applied idempotently on every DB connection. |
 | `.env.local` | Credentials (gitignored). `.env.example` is the committed template. |
 | `docs/OPERATIONS.md` | Operator runbook — weekly workflow, token refresh, onboarding, debugging. |
 | `docs/NEW_CLIENT_ONBOARDING.md` | Step-by-step walkthrough for adding a new client (Graph Explorer UI flow). |
@@ -128,10 +128,10 @@ Run `npm run client:list` to see what's configured. If the client isn't there, a
 
 ### `NOT NULL constraint failed: ...`
 
-The schema was changed without dropping the existing table. SQLite's `CREATE TABLE IF NOT EXISTS` doesn't migrate. Drop the affected table and re-run any command — `src/db/client.ts` will re-apply the schema with the new shape:
+The schema was changed in a way the idempotent migrations in `src/core/db/client.ts` don't cover. Drop the affected table and re-run any command — the schema and migration block will recreate it with the new shape:
 
 ```powershell
-npx tsx -e "import('./src/db/client.js').then(({ db }) => db.exec('DROP TABLE <table_name>'))"
+npx tsx -e "import('./src/core/db/client.js').then(({ db }) => db.exec('DROP TABLE <table_name>'))"
 ```
 
 ## Project structure
@@ -139,28 +139,34 @@ npx tsx -e "import('./src/db/client.js').then(({ db }) => db.exec('DROP TABLE <t
 ```
 AnalyticsAudit/
 ├── src/
-│   ├── api/instagram.ts            # Graph API wrapper, retries, InstagramApiError
-│   ├── api/instagram.live-test.ts  # Live smoke test against the bootstrap account
-│   ├── cli/audit.ts                # Primary command — fetch, persist, report
-│   ├── cli/client-add.ts           # Interactive client onboarding
-│   ├── cli/client-list.ts          # Tabular list
-│   ├── cli/report-trend.ts         # Render HTML trend report from existing snapshots
-│   ├── cli/db-clear.ts             # Wipe DB (dry-run by default, prompts for destructive ops)
-│   ├── db/client.ts                # better-sqlite3 connection + schema init
-│   ├── db/schema.sql               # Applied idempotently per connection
-│   ├── lib/env.ts                  # dotenv + zod env validation
-│   ├── lib/time.ts                 # UTC → ET presentation helpers
-│   ├── reports/generator.ts        # Markdown rolling-report builder
-│   ├── reports/trend-generator.ts  # HTML trend report builder (Chart.js, donuts, sparklines)
-│   ├── reports/_shared.ts          # Cross-generator helpers (hashtag extraction, country/gender expansion, ER, top-N rollup)
-│   └── types/instagram.ts          # zod response schemas + MediaType + METRICS_BY_TYPE
-├── data/                           # SQLite (gitignored)
-├── reports/                        # Generated Markdown (gitignored)
-├── docs/OPERATIONS.md              # Operator runbook
-├── docs/NEW_CLIENT_ONBOARDING.md   # Step-by-step new-client walkthrough
-├── .env.example                    # Committed template
-├── .env.local                      # Credentials (gitignored)
-└── CONTEXT.md                      # Purpose & non-goals
+│   ├── cli/                              # Entry points for `npm run <command>` — platform-agnostic orchestrators
+│   │   ├── audit.ts                      # Primary command — fetch a snapshot, persist, regenerate Markdown report
+│   │   ├── client-add.ts                 # Interactive business + platform_account onboarding
+│   │   ├── client-list.ts                # Tabular list of businesses with last_snapshot
+│   │   ├── db-clear.ts                   # Wipe DB (dry-run by default, gated prompts for destructive ops)
+│   │   ├── report-trend.ts               # Render HTML trend report from existing snapshots
+│   │   └── token-refresh.ts              # Mint a fresh Page Access Token, update platform_accounts.credentials
+│   ├── core/                             # Platform-agnostic guts shared by every platform
+│   │   ├── db/client.ts                  # better-sqlite3 connection + schema init + idempotent migrations
+│   │   ├── db/schema.sql                 # Applied idempotently per connection
+│   │   ├── lib/env.ts                    # dotenv + zod env validation
+│   │   ├── lib/prompt.ts                 # Hidden-input prompt for tokens
+│   │   ├── lib/time.ts                   # UTC → ET presentation helpers (multiple readable formats)
+│   │   └── reports/_shared.ts            # Cross-platform report helpers (hashtag extraction, country/gender expansion, ER, top-N rollup)
+│   └── platforms/                        # One subdirectory per supported platform
+│       └── instagram/                    # Future: facebook-page/, tiktok/, youtube-shorts/
+│           ├── api.ts                    # Graph API wrapper, retries, InstagramApiError
+│           ├── live-test.ts              # Live smoke test against the bootstrap account
+│           ├── markdown-report.ts        # Markdown rolling-report builder
+│           ├── trend-report.ts           # HTML trend report builder (Chart.js, donuts, sparklines)
+│           └── types.ts                  # zod response schemas + MediaType + METRICS_BY_TYPE + AUDIENCE_TYPE_CONFIG
+├── data/                                 # SQLite (gitignored); pre-multi-platform backup also lives here
+├── reports/                              # Generated Markdown + HTML (gitignored)
+├── docs/OPERATIONS.md                    # Operator runbook
+├── docs/NEW_CLIENT_ONBOARDING.md         # Step-by-step new-client walkthrough
+├── .env.example                          # Committed template
+├── .env.local                            # Credentials (gitignored)
+└── CONTEXT.md                            # Purpose & non-goals
 ```
 
 ## Stack

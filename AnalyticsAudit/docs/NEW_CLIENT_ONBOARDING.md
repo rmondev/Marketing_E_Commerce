@@ -151,7 +151,7 @@ The script:
      is_valid=true  type=PAGE
      expires_at=never (derived from long-lived user token — valid as long as the user token is)
    ```
-6. Writes the new Page Token to `clients.page_access_token`.
+6. Writes the new Page Token into the `page_access_token` field of `platform_accounts.credentials` (the per-platform JSON blob) for this client's Instagram platform_account.
 7. Asks whether to also update `META_PAGE_ACCESS_TOKEN` in `.env.local` — default is `N` for non-rmondev clients (the env var is only the bootstrap token for `npm run test:instagram`). Answer `N` for a typical new client.
 
 > If `expires_at` reports a near-future timestamp instead of `never`, the token you pasted was already a Page Token or some other short-lived artifact rather than a fresh User Token. Re-mint per step 1 and re-run.
@@ -206,5 +206,5 @@ If anything looks off, [Where to look when things fail](OPERATIONS.md#where-to-l
 
 - **User Token** — minted in Graph Explorer when "User or Page" is set to "User Token". Carries your FB user's permissions across all Pages you have a role on. Short-lived by default; can be exchanged for long-lived (~60 day) via `/oauth/access_token`.
 - **Page Access Token** — a token scoped to a single FB Page. Derived from a User Token by hitting `/<page-id>?fields=access_token`. Inherits the longevity of the User Token it was derived from (long-lived User → Page Token with `expires_at=0` / "never").
-- **IG Business Account ID** — Instagram's internal ID for the IG account linked to the Page. *Distinct* from the Page ID. Goes in the `ig_business_account_id` column.
-- **Facebook Page ID** — the numeric ID of the FB Page itself. Goes in the `fb_page_id` column. Used by `token:refresh` to derive the Page Token.
+- **IG Business Account ID** — Instagram's internal ID for the IG account linked to the Page. *Distinct* from the Page ID. Stored as `platform_accounts.external_account_id` on the row where `platform = 'instagram'`.
+- **Facebook Page ID** — the numeric ID of the FB Page itself. Stored as the `fb_page_id` field inside `platform_accounts.credentials` (the per-platform JSON blob). Used by `token:refresh` to derive the Page Token.

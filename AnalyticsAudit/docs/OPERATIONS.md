@@ -136,7 +136,7 @@ You'll be asked:
 - Paste the User Token (hidden input)
 - Whether to also update `META_PAGE_ACCESS_TOKEN` in `.env.local` (default Y for rmondev, N for others — only matters for the bootstrap client used by `npm run test:instagram`)
 
-The script does the short→long User Token exchange, derives the Page Token, inspects it via `/debug_token` (printing `is_valid`, `type`, and `expires_at` in ET), updates `clients.page_access_token`, and optionally rewrites `.env.local`.
+The script does the short→long User Token exchange, derives the Page Token, inspects it via `/debug_token` (printing `is_valid`, `type`, and `expires_at` in ET), updates the `page_access_token` field inside `platform_accounts.credentials` (the per-platform JSON blob), and optionally rewrites `.env.local`.
 
 For fully scripted use, pass `--client`, `--user-token`, and `--update-env`:
 
@@ -207,7 +207,7 @@ The audit handles this gracefully:
 
 - A `post_metrics` row is inserted for each pre-conversion post.
 - `like_count` and `comments_count` come from the `/media` endpoint (these still work) and are populated.
-- `reach`, `saved`, `shares`, `video_views` are all set to `NULL`.
+- `shares` and `views` are set to `NULL`. IG-specific `reach` and `saved` (which live in the `platform_extras` JSON) are also `NULL`.
 - The report Posts section calls this out: *"N post(s) in this snapshot returned no insights (likely pre-business-conversion media)"*.
 
 ### Workaround
@@ -226,31 +226,38 @@ When onboarding, always ask when the account was converted to Business. If a mea
 | `(#100) since param is not valid. Metrics data is available for the last 2 years` | Account insights window exceeded Graph's 2-year cap. Account insights are fixed at 7d so you shouldn't see this in normal operation — if you do, check for accidental edits to `ACCOUNT_INSIGHTS_WINDOW_DAYS` in `src/cli/audit.ts`. |
 | `No client with short_name '...'` | Run `npm run client:list`. If the client isn't there, add it with `npm run client:add`. |
 | Audit hangs on a prompt | `client:add` was run with missing required flags. Provide all five (`--name`, `--short-name`, `--ig-account-id`, `--page-id`, `--page-token`) for fully scripted use. |
-| `NOT NULL constraint failed: ...` after a schema change | SQLite's `CREATE TABLE IF NOT EXISTS` doesn't migrate. Drop the affected table and re-run; `src/db/client.ts` will recreate it with the new shape: `npx tsx -e "import('./src/db/client.js').then(({db}) => db.exec('DROP TABLE <table>'))"`. **Verify the table is empty or backed up first** — DROP is destructive. |
-| `TypeError` / unexpected null from wrapper | Meta may have changed a response shape. Run `npm run test:instagram` to probe the wrapper end-to-end against the bootstrap account. The output should match the four-section successful run in [src/api/instagram.live-test.ts](../src/api/instagram.live-test.ts). |
+| `NOT NULL constraint failed: ...` after a schema change | The idempotent migrations in `src/core/db/client.ts` don't cover this case. Drop the affected table and re-run; the schema + migration block will recreate it with the new shape: `npx tsx -e "import('./src/core/db/client.js').then(({db}) => db.exec('DROP TABLE <table>'))"`. **Verify the table is empty or backed up first** — DROP is destructive. |
+| `TypeError` / unexpected null from wrapper | Meta may have changed a response shape. Run `npm run test:instagram` to probe the wrapper end-to-end against the bootstrap account. The output should match the four-section successful run in [src/platforms/instagram/live-test.ts](../src/platforms/instagram/live-test.ts). |
 | Hard-to-diagnose Graph error | The wrapper's `InstagramApiError` carries `httpStatus`, `apiCode`, and `fbtraceId`. Quote the `fbtraceId` to Meta support if needed — it's their request ID for that call. |
 
 ## Database
 
 - **Location:** `data/analytics.db` (single file, gitignored)
-- **Schema:** `src/db/schema.sql`, applied idempotently on every connection
-- **Foreign keys:** enabled per-connection (SQLite's default is off — see `src/db/client.ts`)
-- **Migrations:** `src/db/client.ts` runs a small idempotent `ALTER TABLE ADD COLUMN IF NOT PRESENT` block for the handful of columns added since the initial cut (`lookback_days`, `is_supplemental`, `demographics_attempted`). Anything more invasive (renaming columns, changing types, restructuring tables) still requires a manual `DROP TABLE` and a re-audit.
+- **Schema:** `src/core/db/schema.sql`, applied idempotently on every connection
+- **Foreign keys:** enabled per-connection (SQLite's default is off — see `src/core/db/client.ts`)
+- **Model:** A `client` is a business; each business owns one or more rows in `platform_accounts` (one per platform per business). Snapshots, account_metrics, post_metrics, and demographic_breakdowns all hang off platform_accounts. Platform-specific metrics (Instagram's reach, profile_views, saved, etc.) live in `platform_extras` JSON columns on account_metrics and post_metrics.
+- **Migrations:** `src/core/db/client.ts` runs an idempotent migration block on every connection. Small column additions (`lookback_days`, `is_supplemental`, `demographics_attempted`) use `ALTER TABLE ADD COLUMN`. The larger Phase B migration (business + platform_accounts split, column renames, IG-specific columns moved into platform_extras JSON) uses `ALTER TABLE DROP/RENAME/ADD COLUMN` (SQLite 3.35+). The demographic_breakdowns CHECK relaxation needs a 12-step table rebuild because SQLite cannot drop CHECK constraints in place. Anything more invasive than what's already covered still requires a manual `DROP TABLE` and a re-audit.
 
 ### Inspecting the DB
 
 ```powershell
-# All snapshots
-npx tsx -e "import('./src/db/client.js').then(({ db }) => console.table(db.prepare('SELECT id, client_id, captured_at, lookback_days, demographics_attempted FROM snapshots ORDER BY id').all()))"
+# All snapshots (multi-platform: joined back to platform + business)
+npx tsx -e "import('./src/core/db/client.js').then(({ db }) => console.table(db.prepare('SELECT s.id, c.short_name, pa.platform, s.captured_at, s.lookback_days, s.demographics_attempted FROM snapshots s JOIN platform_accounts pa ON pa.id = s.platform_account_id JOIN clients c ON c.id = pa.client_id ORDER BY s.id').all()))"
 
-# Latest account metrics per snapshot, joined with client name
-npx tsx -e "import('./src/db/client.js').then(({ db }) => console.table(db.prepare('SELECT c.short_name, s.id AS snap_id, s.captured_at, a.followers_count, a.follows_count, a.media_count, a.reach, a.profile_views FROM account_metrics a JOIN snapshots s ON s.id = a.snapshot_id JOIN clients c ON c.id = s.client_id ORDER BY s.id DESC LIMIT 20').all()))"
+# Latest account metrics per snapshot, joined with business + platform.
+# IG-specific reach/profile_views live in account_metrics.platform_extras JSON;
+# json_extract pulls them out.
+npx tsx -e "import('./src/core/db/client.js').then(({ db }) => console.table(db.prepare(`SELECT c.short_name, pa.platform, s.id AS snap_id, s.captured_at, a.followers_count, a.follows_count, a.posts_count, json_extract(a.platform_extras, '$.reach') AS reach, json_extract(a.platform_extras, '$.profile_views') AS profile_views FROM account_metrics a JOIN snapshots s ON s.id = a.snapshot_id JOIN platform_accounts pa ON pa.id = s.platform_account_id JOIN clients c ON c.id = pa.client_id ORDER BY s.id DESC LIMIT 20`).all()))"
 
-# Post metrics counts per snapshot (in-window vs supplemental, no-insights count)
-npx tsx -e "import('./src/db/client.js').then(({ db }) => console.table(db.prepare('SELECT snapshot_id, COUNT(*) AS posts, SUM(is_supplemental) AS supplemental, SUM(CASE WHEN reach IS NULL THEN 1 ELSE 0 END) AS no_insights FROM post_metrics GROUP BY snapshot_id ORDER BY snapshot_id').all()))"
+# Post metrics counts per snapshot (in-window vs supplemental, no-insights count).
+# Per-post IG reach lives in post_metrics.platform_extras JSON.
+npx tsx -e "import('./src/core/db/client.js').then(({ db }) => console.table(db.prepare(`SELECT snapshot_id, COUNT(*) AS posts, SUM(is_supplemental) AS supplemental, SUM(CASE WHEN json_extract(platform_extras, '$.reach') IS NULL THEN 1 ELSE 0 END) AS no_insights FROM post_metrics GROUP BY snapshot_id ORDER BY snapshot_id`).all()))"
 
 # Demographic breakdown row counts per snapshot, grouped by audience type / dimension
-npx tsx -e "import('./src/db/client.js').then(({ db }) => console.table(db.prepare('SELECT snapshot_id, audience_type, dimension, COUNT(*) AS buckets FROM demographic_breakdowns GROUP BY snapshot_id, audience_type, dimension ORDER BY snapshot_id, audience_type, dimension').all()))"
+npx tsx -e "import('./src/core/db/client.js').then(({ db }) => console.table(db.prepare('SELECT snapshot_id, audience_type, dimension, COUNT(*) AS buckets FROM demographic_breakdowns GROUP BY snapshot_id, audience_type, dimension ORDER BY snapshot_id, audience_type, dimension').all()))"
+
+# Platform accounts per business — useful to confirm onboarding worked
+npx tsx -e "import('./src/core/db/client.js').then(({ db }) => console.table(db.prepare('SELECT c.short_name, pa.id AS pa_id, pa.platform, pa.external_account_id, pa.added_at FROM platform_accounts pa JOIN clients c ON c.id = pa.client_id ORDER BY c.id, pa.id').all()))"
 ```
 
 When passing SQL through `tsx -e` from PowerShell, keep all JS strings single-quoted to avoid PowerShell expanding `*` in `COUNT(*)`.
@@ -284,11 +291,11 @@ Restoration is simply copying the backup back over `data/analytics.db` while no 
 
 ## Token storage
 
-Per-client Page Access Tokens live in `clients.page_access_token` as plain text. The database is local; this is acceptable for v0 single-user CLI use. The DB file is in `.gitignore` and must not be committed.
+Per-platform credentials (including Page Access Tokens for Instagram + Facebook Pages) live in the `platform_accounts.credentials` column as a JSON blob whose shape is defined by each platform's onboarding code. Stored as plain text. The database is local; this is acceptable for v0 single-user CLI use. The DB file is in `.gitignore` and must not be committed.
 
 ## Diagnostics
 
-`npm run test:instagram` runs `src/api/instagram.live-test.ts`, which hits all four wrapper functions against the bootstrap account in `.env.local`. Use it when:
+`npm run test:instagram` runs `src/platforms/instagram/live-test.ts`, which hits all four wrapper functions against the bootstrap account in `.env.local`. Use it when:
 
 - A wrapper function suddenly starts failing and you suspect Meta changed a response shape
 - Verifying a freshly minted bootstrap token works
