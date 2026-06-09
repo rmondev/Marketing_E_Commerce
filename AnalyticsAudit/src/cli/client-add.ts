@@ -91,25 +91,48 @@ try {
     { masked: true },
   );
 
-  const insert = db.prepare(`
-    INSERT INTO clients (
-      short_name, display_name, ig_business_account_id, fb_page_id,
-      page_access_token, created_at, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  // Two inserts in one transaction: the business-level clients row and the
+  // Instagram platform_account row that holds the IG-specific IDs + token in
+  // its credentials JSON. Phase E (multi-platform onboarding) will replace
+  // this single-platform flow with a loop over selected platforms.
+  const insertClient = db.prepare(`
+    INSERT INTO clients (short_name, display_name, created_at, notes)
+    VALUES (?, ?, ?, ?)
+  `);
+  const insertPlatformAccount = db.prepare(`
+    INSERT INTO platform_accounts (
+      client_id, platform, external_account_id, credentials, added_at
+    ) VALUES (?, 'instagram', ?, ?, ?)
   `);
 
   try {
-    const result = insert.run(
-      shortName,
-      name,
-      igAccountId,
-      pageId,
-      pageToken,
-      new Date().toISOString(),
-      notes ?? null,
-    );
-    console.log(`\nAdded client '${shortName}' (id=${result.lastInsertRowid}).`);
+    const onboard = db.transaction(() => {
+      const nowIso = new Date().toISOString();
+      const clientRes = insertClient.run(
+        shortName,
+        name,
+        nowIso,
+        notes ?? null,
+      );
+      const clientId = Number(clientRes.lastInsertRowid);
+      const paRes = insertPlatformAccount.run(
+        clientId,
+        igAccountId,
+        JSON.stringify({
+          page_access_token: pageToken,
+          fb_page_id: pageId,
+        }),
+        nowIso,
+      );
+      return {
+        clientId,
+        platformAccountId: Number(paRes.lastInsertRowid),
+      };
+    });
+    const { clientId, platformAccountId } = onboard();
+    console.log(`\nAdded client '${shortName}' (id=${clientId}).`);
     console.log(`  display_name:           ${name}`);
+    console.log(`  platform_account_id:    ${platformAccountId} (instagram)`);
     console.log(`  ig_business_account_id: ${igAccountId}`);
     console.log(`  fb_page_id:             ${pageId}`);
     console.log(`  page_access_token:      ${maskToken(pageToken)}`);

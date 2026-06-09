@@ -40,13 +40,18 @@ const opts = program.opts() as {
   backup: boolean; // commander inverts --no-backup
 };
 
+// History tables are children of snapshots (which child to platform_accounts);
+// they all get wiped on --confirm. Clients and platform_accounts together
+// represent the business + per-channel configuration and only get wiped on
+// --include-clients (FK-respecting order: platform_accounts depend on clients).
 const HISTORY_TABLES = [
   "demographic_breakdowns",
   "post_metrics",
   "account_metrics",
   "snapshots",
 ] as const;
-const ALL_TABLES = [...HISTORY_TABLES, "clients"] as const;
+const CLIENT_TABLES = ["platform_accounts", "clients"] as const;
+const ALL_TABLES = [...HISTORY_TABLES, ...CLIENT_TABLES] as const;
 
 type CountRow = { c: number };
 const counts: Record<string, number> = {};
@@ -58,9 +63,11 @@ for (const t of ALL_TABLES) {
 
 const wipingClients = opts.includeClients === true;
 
+const historyTableNames = HISTORY_TABLES as readonly string[];
+
 console.log("Current row counts:");
 for (const t of ALL_TABLES) {
-  const willClear = wipingClients || (HISTORY_TABLES as readonly string[]).includes(t);
+  const willClear = wipingClients || historyTableNames.includes(t);
   const marker = willClear ? "→ will clear" : "→ preserved";
   console.log(`  ${t.padEnd(25)} ${String(counts[t]).padStart(6)}  ${marker}`);
 }
@@ -114,6 +121,7 @@ if (opts.backup !== false) {
 }
 
 // Delete in FK-respecting order: children before parents (ON DELETE RESTRICT).
+// History tables first, then platform_accounts → clients when wiping clients.
 const wipe = db.transaction(() => {
   for (const t of HISTORY_TABLES) {
     db.exec(`DELETE FROM ${t}`);
@@ -122,8 +130,12 @@ const wipe = db.transaction(() => {
     `DELETE FROM sqlite_sequence WHERE name IN ('snapshots','account_metrics','post_metrics','demographic_breakdowns')`,
   );
   if (wipingClients) {
-    db.exec("DELETE FROM clients");
-    db.exec("DELETE FROM sqlite_sequence WHERE name = 'clients'");
+    for (const t of CLIENT_TABLES) {
+      db.exec(`DELETE FROM ${t}`);
+    }
+    db.exec(
+      `DELETE FROM sqlite_sequence WHERE name IN ('platform_accounts','clients')`,
+    );
   }
 });
 wipe();

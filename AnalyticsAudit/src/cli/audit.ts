@@ -66,32 +66,46 @@ if (rawOpts.lookbackDays !== undefined) {
   lookbackDays = parsed;
 }
 
+// Joins clients to its Instagram platform_account. Audit is currently
+// IG-only; once Phase D's registry lands, audit.ts will iterate over a
+// client's configured platforms and dispatch per-platform.
 type ClientRow = {
-  id: number;
+  client_id: number;
   short_name: string;
   display_name: string;
-  ig_business_account_id: string;
-  fb_page_id: string;
+  platform_account_id: number;
+  external_account_id: string;
+  credentials: string;
+};
+type InstagramCredentials = {
   page_access_token: string;
+  fb_page_id?: string;
 };
 
 const client = db
   .prepare(
-    `SELECT id, short_name, display_name, ig_business_account_id,
-            fb_page_id, page_access_token
-       FROM clients
-       WHERE short_name = ?`,
+    `SELECT c.id AS client_id, c.short_name, c.display_name,
+            pa.id AS platform_account_id, pa.external_account_id, pa.credentials
+       FROM clients c
+       JOIN platform_accounts pa ON pa.client_id = c.id
+       WHERE c.short_name = ? AND pa.platform = 'instagram'`,
   )
   .get(shortName) as ClientRow | undefined;
 
 if (!client) {
-  console.error(`No client with short_name '${shortName}'.`);
+  console.error(
+    `No Instagram platform_account for client '${shortName}'.`,
+  );
   console.error("  Use 'npm run client:list' to see configured clients.");
   process.exit(1);
 }
 
+const igCreds = JSON.parse(client.credentials) as InstagramCredentials;
+const igAccountId = client.external_account_id;
+const pageAccessToken = igCreds.page_access_token;
+
 console.log(`Auditing ${client.display_name} (${client.short_name})`);
-console.log(`  ig_business_account_id: ${client.ig_business_account_id}`);
+console.log(`  ig_business_account_id: ${igAccountId}`);
 
 const now = new Date();
 const nowUnix = Math.floor(now.getTime() / 1000);
@@ -110,8 +124,8 @@ console.log(
 
 console.log("\nFetching account profile...");
 const profile = await getAccountProfile(
-  client.ig_business_account_id,
-  client.page_access_token,
+  igAccountId,
+  pageAccessToken,
 );
 console.log(
   `  followers=${profile.followers_count}  follows=${profile.follows_count}  media=${profile.media_count}`,
@@ -119,8 +133,8 @@ console.log(
 
 console.log("\nFetching account insights...");
 const accountInsights = await getAccountInsights(
-  client.ig_business_account_id,
-  client.page_access_token,
+  igAccountId,
+  pageAccessToken,
   accountSinceUnix,
   nowUnix,
   ["reach", "profile_views"],
@@ -137,8 +151,8 @@ console.log(`  reach=${reachValue}  profile_views=${profileViewsValue}`);
 
 console.log("\nListing recent media...");
 const allMedia = await listRecentMedia(
-  client.ig_business_account_id,
-  client.page_access_token,
+  igAccountId,
+  pageAccessToken,
   MAX_POSTS_TO_SCAN,
 );
 // Sort newest-first so the supplemental fill picks the most recent
@@ -176,7 +190,7 @@ for (const { item, isSupplemental } of mediaToCapture) {
   const insights = await getMediaInsights(
     item.id,
     kind,
-    client.page_access_token,
+    pageAccessToken,
   );
   mediaWithInsights.push({ item, kind, insights, isSupplemental });
 }
@@ -194,10 +208,10 @@ const demographicCaptures: DemographicCapture[] = [];
 for (const audienceType of AUDIENCE_TYPES) {
   for (const dimension of DEMOGRAPHIC_DIMENSIONS) {
     const buckets = await getAudienceDemographics(
-      client.ig_business_account_id,
+      igAccountId,
       audienceType,
       dimension,
-      client.page_access_token,
+      pageAccessToken,
     );
     if (buckets !== null) {
       demographicCaptures.push({ audienceType, dimension, buckets });
@@ -213,20 +227,19 @@ console.log(
 );
 
 const insertSnapshot = db.prepare(
-  "INSERT INTO snapshots (client_id, captured_at, lookback_days, demographics_attempted, notes) VALUES (?, ?, ?, ?, ?)",
+  "INSERT INTO snapshots (platform_account_id, captured_at, lookback_days, demographics_attempted, notes) VALUES (?, ?, ?, ?, ?)",
 );
 const insertAccountMetrics = db.prepare(`
   INSERT INTO account_metrics (
-    snapshot_id, followers_count, follows_count, media_count,
-    reach, profile_views, website_clicks
-  ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    snapshot_id, followers_count, follows_count, posts_count, platform_extras
+  ) VALUES (?, ?, ?, ?, ?)
 `);
 const insertPostMetric = db.prepare(`
   INSERT INTO post_metrics (
-    snapshot_id, ig_media_id, media_type, caption, permalink, published_at,
-    like_count, comments_count, reach, saved, shares, video_views,
-    is_supplemental
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    snapshot_id, external_post_id, media_type, caption, permalink,
+    published_at, like_count, comments_count, shares, views,
+    is_supplemental, platform_extras
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const insertDemographicBreakdown = db.prepare(`
   INSERT INTO demographic_breakdowns (
@@ -236,7 +249,7 @@ const insertDemographicBreakdown = db.prepare(`
 
 const persist = db.transaction((): number => {
   const snapResult = insertSnapshot.run(
-    client.id,
+    client.platform_account_id,
     now.toISOString(),
     lookbackDays,
     1, // demographics_attempted — this build always tries the 2x4 grid above
@@ -244,14 +257,20 @@ const persist = db.transaction((): number => {
   );
   const snapshotId = Number(snapResult.lastInsertRowid);
 
+  // Instagram-specific account extras (reach, profile_views, website_clicks)
+  // live in the platform_extras JSON. Other platforms will store their own
+  // shape; readers parse this column with knowledge of which platform the
+  // snapshot belongs to.
   insertAccountMetrics.run(
     snapshotId,
     profile.followers_count,
     profile.follows_count,
     profile.media_count,
-    reachValue,
-    profileViewsValue,
-    null, // website_clicks not fetched in v0
+    JSON.stringify({
+      reach: reachValue,
+      profile_views: profileViewsValue,
+      website_clicks: null, // not fetched in v0
+    }),
   );
 
   for (const { item, kind, insights, isSupplemental } of mediaWithInsights) {
@@ -266,13 +285,13 @@ const persist = db.transaction((): number => {
       item.timestamp,
       item.like_count,
       item.comments_count,
-      insights?.reach ?? null,
-      insights?.saved ?? null,
       insights?.shares ?? null,
-      // Graph v25 returns the metric as "views"; we keep the schema column
-      // name "video_views" to match the original brief.
       insights?.views ?? null,
       isSupplemental ? 1 : 0,
+      JSON.stringify({
+        reach: insights?.reach ?? null,
+        saved: insights?.saved ?? null,
+      }),
     );
   }
 
@@ -306,7 +325,8 @@ console.log(
 );
 
 const { rollingPath, archivePath } = generateReport({
-  id: client.id,
+  client_id: client.client_id,
+  platform_account_id: client.platform_account_id,
   short_name: client.short_name,
   display_name: client.display_name,
 });

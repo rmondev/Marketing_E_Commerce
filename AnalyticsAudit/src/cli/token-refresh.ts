@@ -38,18 +38,43 @@ type RawOpts = {
 };
 const rawOpts = program.opts() as RawOpts;
 
+// Token refresh is currently IG-only. Each row joins clients to its
+// Instagram platform_account so we have the fb_page_id from the
+// credentials JSON. Phase D's registry will let other platforms register
+// their own refresh logic; this file stays IG-specific.
 type ClientRow = {
-  id: number;
+  client_id: number;
   short_name: string;
   display_name: string;
-  fb_page_id: string;
+  platform_account_id: number;
+  credentials: string;
+};
+type InstagramCredentials = {
+  page_access_token: string;
+  fb_page_id?: string;
 };
 
-const clients = db
+const clientRows = db
   .prepare(
-    "SELECT id, short_name, display_name, fb_page_id FROM clients ORDER BY id",
+    `SELECT c.id AS client_id, c.short_name, c.display_name,
+            pa.id AS platform_account_id, pa.credentials
+       FROM clients c
+       JOIN platform_accounts pa ON pa.client_id = c.id
+       WHERE pa.platform = 'instagram'
+       ORDER BY c.id`,
   )
   .all() as ClientRow[];
+
+type ClientWithCreds = ClientRow & { fb_page_id: string };
+const clients: ClientWithCreds[] = clientRows.map((c) => {
+  const creds = JSON.parse(c.credentials) as InstagramCredentials;
+  if (creds.fb_page_id === undefined) {
+    throw new Error(
+      `Platform account for client '${c.short_name}' is missing fb_page_id in credentials JSON.`,
+    );
+  }
+  return { ...c, fb_page_id: creds.fb_page_id };
+});
 
 if (clients.length === 0) {
   console.error("No clients in the database. Run 'npm run client:add' first.");
@@ -124,13 +149,17 @@ if (!debug.is_valid) {
   process.exit(1);
 }
 
-// 6. Update DB
-db.prepare("UPDATE clients SET page_access_token = ? WHERE id = ?").run(
-  pageToken,
-  client.id,
-);
+// 6. Update DB — replace the page_access_token field inside the credentials
+// JSON for this client's Instagram platform_account. fb_page_id stays put.
+const newCredsJson = JSON.stringify({
+  page_access_token: pageToken,
+  fb_page_id: client.fb_page_id,
+});
+db.prepare(
+  "UPDATE platform_accounts SET credentials = ? WHERE id = ?",
+).run(newCredsJson, client.platform_account_id);
 console.log(
-  `\nUpdated clients.page_access_token for '${client.short_name}' (id=${client.id}).`,
+  `\nUpdated platform_accounts.credentials for '${client.short_name}' (platform_account_id=${client.platform_account_id}).`,
 );
 
 // 7. Optionally update .env.local

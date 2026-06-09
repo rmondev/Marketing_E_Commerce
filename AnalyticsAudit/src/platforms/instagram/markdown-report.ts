@@ -20,27 +20,65 @@ import {
   truncateCaption,
 } from "../../core/reports/_shared.js";
 
+// Identifies a (business + IG platform account) pair. Reports are still
+// rendered per-business-per-platform; once Phase C restructures reports/,
+// the file paths will be derived from (short_name + platform_account_id).
 export type ClientRef = {
-  id: number;
+  client_id: number;
+  platform_account_id: number;
   short_name: string;
   display_name: string;
 };
 
 type Snapshot = {
   id: number;
-  client_id: number;
+  platform_account_id: number;
   captured_at: string;
   lookback_days: number;
   demographics_attempted: number;
 };
 
-type AccountMetrics = {
-  followers_count: number;
-  follows_count: number;
-  media_count: number;
+// Shape of the JSON stored in account_metrics.platform_extras for Instagram.
+type InstagramAccountExtras = {
   reach: number;
   profile_views: number;
   website_clicks: number | null;
+};
+
+type AccountMetricsRow = {
+  followers_count: number;
+  follows_count: number;
+  posts_count: number;
+  platform_extras: string | null; // JSON
+};
+
+type AccountMetrics = {
+  followers_count: number;
+  follows_count: number;
+  media_count: number; // mapped from posts_count for display continuity
+  reach: number;
+  profile_views: number;
+  website_clicks: number | null;
+};
+
+// Shape of the JSON stored in post_metrics.platform_extras for Instagram.
+type InstagramPostExtras = {
+  reach: number | null;
+  saved: number | null;
+};
+
+type PostMetricRow = {
+  external_post_id: string;
+  media_type: string;
+  caption: string | null;
+  permalink: string;
+  published_at: string;
+  like_count: number;
+  comments_count: number;
+  shares: number | null;
+  views: number | null;
+  is_supplemental: number;
+  platform_extras: string | null; // JSON
 };
 
 type PostMetric = {
@@ -57,6 +95,40 @@ type PostMetric = {
   video_views: number | null;
   is_supplemental: number;
 };
+
+function parseAccountMetrics(row: AccountMetricsRow): AccountMetrics {
+  const extras = (
+    row.platform_extras ? JSON.parse(row.platform_extras) : {}
+  ) as Partial<InstagramAccountExtras>;
+  return {
+    followers_count: row.followers_count,
+    follows_count: row.follows_count,
+    media_count: row.posts_count,
+    reach: extras.reach ?? 0,
+    profile_views: extras.profile_views ?? 0,
+    website_clicks: extras.website_clicks ?? null,
+  };
+}
+
+function parsePostMetric(row: PostMetricRow): PostMetric {
+  const extras = (
+    row.platform_extras ? JSON.parse(row.platform_extras) : {}
+  ) as Partial<InstagramPostExtras>;
+  return {
+    ig_media_id: row.external_post_id,
+    media_type: row.media_type,
+    caption: row.caption,
+    permalink: row.permalink,
+    published_at: row.published_at,
+    like_count: row.like_count,
+    comments_count: row.comments_count,
+    reach: extras.reach ?? null,
+    saved: extras.saved ?? null,
+    shares: row.shares,
+    video_views: row.views,
+    is_supplemental: row.is_supplemental,
+  };
+}
 
 type DemographicRow = {
   audience_type: string;
@@ -76,12 +148,12 @@ export type GenerateReportResult = {
 export function generateReport(client: ClientRef): GenerateReportResult {
   const snapshots = db
     .prepare(
-      `SELECT id, client_id, captured_at, lookback_days, demographics_attempted
+      `SELECT id, platform_account_id, captured_at, lookback_days, demographics_attempted
          FROM snapshots
-         WHERE client_id = ?
+         WHERE platform_account_id = ?
          ORDER BY id DESC`,
     )
-    .all(client.id) as Snapshot[];
+    .all(client.platform_account_id) as Snapshot[];
 
   const rollingSnapshots = snapshots.slice(0, ROLLING_WINDOW);
   const archiveSnapshots = snapshots.slice(ROLLING_WINDOW);
@@ -208,34 +280,37 @@ function renderSnapshotSection(
   snapshot: Snapshot,
   prior: Snapshot | undefined,
 ): string {
-  const accountMetrics = db
+  const accountMetricsRow = db
     .prepare(
-      `SELECT followers_count, follows_count, media_count,
-              reach, profile_views, website_clicks
+      `SELECT followers_count, follows_count, posts_count, platform_extras
          FROM account_metrics WHERE snapshot_id = ?`,
     )
-    .get(snapshot.id) as AccountMetrics;
+    .get(snapshot.id) as AccountMetricsRow;
+  const accountMetrics = parseAccountMetrics(accountMetricsRow);
 
-  const priorAccountMetrics = prior
+  const priorAccountMetricsRow = prior
     ? (db
         .prepare(
-          `SELECT followers_count, follows_count, media_count,
-                  reach, profile_views, website_clicks
+          `SELECT followers_count, follows_count, posts_count, platform_extras
              FROM account_metrics WHERE snapshot_id = ?`,
         )
-        .get(prior.id) as AccountMetrics | undefined)
+        .get(prior.id) as AccountMetricsRow | undefined)
+    : undefined;
+  const priorAccountMetrics = priorAccountMetricsRow
+    ? parseAccountMetrics(priorAccountMetricsRow)
     : undefined;
 
-  const posts = db
+  const postRows = db
     .prepare(
-      `SELECT ig_media_id, media_type, caption, permalink, published_at,
-              like_count, comments_count, reach, saved, shares, video_views,
-              is_supplemental
+      `SELECT external_post_id, media_type, caption, permalink, published_at,
+              like_count, comments_count, shares, views, is_supplemental,
+              platform_extras
          FROM post_metrics
          WHERE snapshot_id = ?
          ORDER BY published_at DESC`,
     )
-    .all(snapshot.id) as PostMetric[];
+    .all(snapshot.id) as PostMetricRow[];
+  const posts = postRows.map(parsePostMetric);
 
   const demographicRows = db
     .prepare(

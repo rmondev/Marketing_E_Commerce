@@ -53,6 +53,20 @@ type Snapshot = {
   demographics_attempted: number;
 };
 
+// DB row shape for account_metrics (the multi-platform schema). Translates
+// into the IG-shaped AccountRow used by the rest of this module.
+type AccountMetricsDbRow = {
+  snapshot_id: number;
+  followers_count: number;
+  follows_count: number;
+  posts_count: number;
+  platform_extras: string | null; // JSON
+};
+type InstagramAccountExtras = {
+  reach: number;
+  profile_views: number;
+  website_clicks?: number | null;
+};
 type AccountRow = {
   snapshot_id: number;
   followers_count: number;
@@ -62,6 +76,24 @@ type AccountRow = {
   profile_views: number;
 };
 
+type PostMetricsDbRow = {
+  snapshot_id: number;
+  external_post_id: string;
+  media_type: string;
+  caption: string | null;
+  permalink: string;
+  published_at: string;
+  like_count: number;
+  comments_count: number;
+  shares: number | null;
+  views: number | null;
+  is_supplemental: number;
+  platform_extras: string | null; // JSON
+};
+type InstagramPostExtras = {
+  reach: number | null;
+  saved: number | null;
+};
 type PostRow = {
   snapshot_id: number;
   ig_media_id: string;
@@ -77,6 +109,41 @@ type PostRow = {
   video_views: number | null;
   is_supplemental: number;
 };
+
+function accountRowFromDb(r: AccountMetricsDbRow): AccountRow {
+  const extras = (
+    r.platform_extras ? JSON.parse(r.platform_extras) : {}
+  ) as Partial<InstagramAccountExtras>;
+  return {
+    snapshot_id: r.snapshot_id,
+    followers_count: r.followers_count,
+    follows_count: r.follows_count,
+    media_count: r.posts_count,
+    reach: extras.reach ?? 0,
+    profile_views: extras.profile_views ?? 0,
+  };
+}
+
+function postRowFromDb(r: PostMetricsDbRow): PostRow {
+  const extras = (
+    r.platform_extras ? JSON.parse(r.platform_extras) : {}
+  ) as Partial<InstagramPostExtras>;
+  return {
+    snapshot_id: r.snapshot_id,
+    ig_media_id: r.external_post_id,
+    media_type: r.media_type,
+    caption: r.caption,
+    permalink: r.permalink,
+    published_at: r.published_at,
+    like_count: r.like_count,
+    comments_count: r.comments_count,
+    reach: extras.reach ?? null,
+    saved: extras.saved ?? null,
+    shares: r.shares,
+    video_views: r.views,
+    is_supplemental: r.is_supplemental,
+  };
+}
 
 type DemographicRow = {
   audience_type: string;
@@ -142,11 +209,11 @@ export function generateTrendReport(client: ClientRef): string | null {
     .prepare(
       `SELECT id, captured_at, demographics_attempted
          FROM snapshots
-         WHERE client_id = ?
+         WHERE platform_account_id = ?
          ORDER BY id DESC
          LIMIT ?`,
     )
-    .all(client.id, WINDOW_SIZE) as Snapshot[];
+    .all(client.platform_account_id, WINDOW_SIZE) as Snapshot[];
 
   if (snapshots.length === 0) return null;
 
@@ -155,36 +222,39 @@ export function generateTrendReport(client: ClientRef): string | null {
   const ids = snapshots.map((s) => s.id);
   const placeholders = ids.map(() => "?").join(",");
 
-  const accountRows = db
+  const accountDbRows = db
     .prepare(
-      `SELECT snapshot_id, followers_count, follows_count, media_count,
-              reach, profile_views
+      `SELECT snapshot_id, followers_count, follows_count, posts_count,
+              platform_extras
          FROM account_metrics
          WHERE snapshot_id IN (${placeholders})`,
     )
-    .all(...ids) as AccountRow[];
+    .all(...ids) as AccountMetricsDbRow[];
+  const accountRows = accountDbRows.map(accountRowFromDb);
   const accountById = new Map(accountRows.map((r) => [r.snapshot_id, r]));
 
-  const latestPosts = db
+  const latestPostDbRows = db
     .prepare(
-      `SELECT snapshot_id, ig_media_id, media_type, caption, permalink,
-              published_at, like_count, comments_count, reach, saved, shares,
-              video_views, is_supplemental
+      `SELECT snapshot_id, external_post_id, media_type, caption, permalink,
+              published_at, like_count, comments_count, shares, views,
+              is_supplemental, platform_extras
          FROM post_metrics
          WHERE snapshot_id = ?
          ORDER BY published_at DESC`,
     )
-    .all(latest.id) as PostRow[];
+    .all(latest.id) as PostMetricsDbRow[];
+  const latestPosts = latestPostDbRows.map(postRowFromDb);
 
-  const allWindowPosts = db
+  const allWindowPostDbRows = db
     .prepare(
-      `SELECT snapshot_id, ig_media_id, media_type, caption, permalink,
-              published_at, like_count, comments_count, reach, saved, shares,
-              video_views, is_supplemental
+      `SELECT snapshot_id, external_post_id, media_type, caption, permalink,
+              published_at, like_count, comments_count, shares, views,
+              is_supplemental, platform_extras
          FROM post_metrics
          WHERE snapshot_id IN (${placeholders})`,
     )
-    .all(...ids) as PostRow[];
+    .all(...ids) as PostMetricsDbRow[];
+  const allWindowPosts = allWindowPostDbRows.map(postRowFromDb);
 
   const demographicRows = db
     .prepare(

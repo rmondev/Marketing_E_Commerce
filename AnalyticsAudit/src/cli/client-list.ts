@@ -7,6 +7,10 @@ interface Row {
   last_snapshot: string | null;
 }
 
+// MAX(captured_at) is over snapshots across all of the client's platform
+// accounts — the "when did we last audit any channel for this business"
+// signal. Per-platform breakdown is a future enhancement (could show one
+// row per platform, or a "platforms" column).
 const rows = db
   .prepare(
     `SELECT
@@ -15,7 +19,8 @@ const rows = db
        c.display_name,
        MAX(s.captured_at) AS last_snapshot
      FROM clients c
-     LEFT JOIN snapshots s ON s.client_id = c.id
+     LEFT JOIN platform_accounts pa ON pa.client_id = c.id
+     LEFT JOIN snapshots s ON s.platform_account_id = pa.id
      GROUP BY c.id
      ORDER BY c.id`,
   )
