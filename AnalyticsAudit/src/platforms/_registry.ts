@@ -66,19 +66,45 @@ export type PlatformTokenRefreshResult = {
   expiresAtIso?: string;  // optional; for display only
 };
 
+// Onboarding collects whatever platform-specific fields are needed to seed
+// a row in platform_accounts. Each platform parses its own flags out of
+// flagValues; if `interactive` is true the platform may prompt for any
+// missing required fields, else it must fail with a clear message.
+export type PlatformOnboardingInput = {
+  flagValues: Record<string, string | undefined>;
+  interactive: boolean;
+};
+
+export type PlatformOnboardingResult = {
+  external_account_id: string;
+  display_handle?: string;
+  credentials: string; // JSON; shape defined by the platform
+};
+
+// Per-capability flags. Different platforms hit different milestones at
+// different times — Facebook Pages might support onboarding (Phase E) long
+// before its audit is built. Splitting lets the CLI decide per-action
+// whether to dispatch or print a friendly skip.
+export type PlatformCapabilities = {
+  audit: boolean;
+  reports: boolean;       // markdown + trend report generation
+  onboarding: boolean;
+  tokenRefresh: boolean;
+};
+
 export type PlatformHandle = {
   // Identifier used as the value of platform_accounts.platform (lowercase
   // snake_case for portability across SQL contexts).
   name: string;
   // Human-readable name shown in CLI output ("Instagram", "Facebook Page").
   displayName: string;
-  // Set false for scaffolded-but-unbuilt platforms. CLI uses this to print
-  // a friendly skip message instead of attempting the call.
-  isImplemented: boolean;
+  // Which functions are real vs throw-on-call stubs. CLIs gate on these.
+  capabilities: PlatformCapabilities;
 
   audit: (input: PlatformAuditInput) => Promise<PlatformAuditResult>;
   generateMarkdownReport: (client: ClientRef) => GenerateReportResult;
   generateTrendReport: (client: ClientRef) => GenerateTrendResult | null;
+  onboarding: (input: PlatformOnboardingInput) => Promise<PlatformOnboardingResult>;
   tokenRefresh: (input: PlatformTokenRefreshInput) => Promise<PlatformTokenRefreshResult>;
 };
 

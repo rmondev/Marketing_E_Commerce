@@ -123,14 +123,14 @@ for (const pa of platformAccounts) {
     });
     continue;
   }
-  if (!handle.isImplemented) {
+  if (!handle.capabilities.audit) {
     console.log(
       `${displayName} audit is registered but not yet implemented. Skipping.\n`,
     );
     results.push({
       platform: pa.platform,
       status: "skipped",
-      detail: "not yet implemented",
+      detail: "audit not yet implemented",
     });
     continue;
   }

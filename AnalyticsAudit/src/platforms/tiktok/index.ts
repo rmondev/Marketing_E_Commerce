@@ -10,13 +10,23 @@
 
 import type { PlatformHandle } from "../_registry.js";
 import { notImplemented } from "../_registry.js";
+import { onboardTikTok } from "./onboarding.js";
 
 export const tiktokPlatform: PlatformHandle = {
   name: "tiktok",
   displayName: "TikTok",
-  isImplemented: false,
+  capabilities: {
+    audit: false,
+    reports: false,
+    // Onboarding is a placeholder (no real OAuth yet — just paste a
+    // pre-minted token). Enables attaching the row today so audits start
+    // working when implemented.
+    onboarding: true,
+    tokenRefresh: false,
+  },
   audit: () => notImplemented("TikTok", "audit"),
   generateMarkdownReport: () => notImplemented("TikTok", "markdown report"),
   generateTrendReport: () => notImplemented("TikTok", "trend report"),
+  onboarding: onboardTikTok,
   tokenRefresh: () => notImplemented("TikTok", "token refresh"),
 };

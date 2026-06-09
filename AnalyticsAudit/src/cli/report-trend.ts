@@ -73,8 +73,8 @@ for (const pa of platformAccounts) {
     console.log(`[${pa.platform}] no handler registered — skipping.`);
     continue;
   }
-  if (!handle.isImplemented) {
-    console.log(`[${displayName}] not yet implemented — skipping.`);
+  if (!handle.capabilities.reports) {
+    console.log(`[${displayName}] reports not yet implemented — skipping.`);
     continue;
   }
 

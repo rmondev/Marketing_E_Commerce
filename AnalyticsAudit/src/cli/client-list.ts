@@ -4,19 +4,21 @@ interface Row {
   id: number;
   short_name: string;
   display_name: string;
+  platforms: string | null;
   last_snapshot: string | null;
 }
 
-// MAX(captured_at) is over snapshots across all of the client's platform
-// accounts — the "when did we last audit any channel for this business"
-// signal. Per-platform breakdown is a future enhancement (could show one
-// row per platform, or a "platforms" column).
+// Per-business summary with:
+//   - a comma-list of attached platforms (GROUP_CONCAT over platform_accounts)
+//   - the last_snapshot timestamp across all of those platforms
+//     (MAX(captured_at) signals "when did we last audit ANY channel")
 const rows = db
   .prepare(
     `SELECT
        c.id,
        c.short_name,
        c.display_name,
+       GROUP_CONCAT(DISTINCT pa.platform) AS platforms,
        MAX(s.captured_at) AS last_snapshot
      FROM clients c
      LEFT JOIN platform_accounts pa ON pa.client_id = c.id
@@ -28,23 +30,30 @@ const rows = db
 
 if (rows.length === 0) {
   console.log("No clients configured.");
-  console.log(
-    "  Add one with: npm run client:add -- --name \"...\" --short-name ... --ig-account-id ... --page-id ... --page-token ...",
-  );
+  console.log("  Add one with: npm run client:add");
   process.exit(0);
 }
 
 const idW = Math.max(2, ...rows.map((r) => String(r.id).length));
 const shortW = Math.max(10, ...rows.map((r) => r.short_name.length));
 const nameW = Math.max(12, ...rows.map((r) => r.display_name.length));
+const platW = Math.max(
+  9,
+  ...rows.map((r) => (r.platforms ?? "(none)").length),
+);
 
-const header = `${"ID".padEnd(idW)}  ${"SHORT_NAME".padEnd(shortW)}  ${"DISPLAY_NAME".padEnd(nameW)}  LAST_SNAPSHOT`;
+const header =
+  `${"ID".padEnd(idW)}  ${"SHORT_NAME".padEnd(shortW)}  ` +
+  `${"DISPLAY_NAME".padEnd(nameW)}  ${"PLATFORMS".padEnd(platW)}  ` +
+  "LAST_SNAPSHOT";
 console.log(header);
 console.log("-".repeat(header.length));
 for (const r of rows) {
   const last = r.last_snapshot ?? "(never)";
+  const platforms = r.platforms ?? "(none)";
   console.log(
-    `${String(r.id).padEnd(idW)}  ${r.short_name.padEnd(shortW)}  ${r.display_name.padEnd(nameW)}  ${last}`,
+    `${String(r.id).padEnd(idW)}  ${r.short_name.padEnd(shortW)}  ` +
+      `${r.display_name.padEnd(nameW)}  ${platforms.padEnd(platW)}  ${last}`,
   );
 }
 console.log(`\n${rows.length} client(s).`);

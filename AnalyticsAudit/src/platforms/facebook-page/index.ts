@@ -9,14 +9,24 @@
 
 import type { PlatformHandle } from "../_registry.js";
 import { notImplemented } from "../_registry.js";
+import { onboardFacebookPage } from "./onboarding.js";
 
 export const facebookPagePlatform: PlatformHandle = {
   name: "facebook_page",
   displayName: "Facebook Page",
-  isImplemented: false,
+  capabilities: {
+    audit: false,
+    reports: false,
+    // Onboarding works ahead of audit: you can attach a FB Page
+    // platform_account today; the row sits ready for when the audit
+    // implementation lands.
+    onboarding: true,
+    tokenRefresh: false,
+  },
   audit: () => notImplemented("Facebook Page", "audit"),
   generateMarkdownReport: () =>
     notImplemented("Facebook Page", "markdown report"),
   generateTrendReport: () => notImplemented("Facebook Page", "trend report"),
+  onboarding: onboardFacebookPage,
   tokenRefresh: () => notImplemented("Facebook Page", "token refresh"),
 };

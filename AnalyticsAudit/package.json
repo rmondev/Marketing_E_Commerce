@@ -10,6 +10,7 @@
     "audit": "tsx src/cli/audit.ts",
     "client:add": "tsx src/cli/client-add.ts",
     "client:list": "tsx src/cli/client-list.ts",
+    "client:platform:add": "tsx src/cli/client-platform-add.ts",
     "token:refresh": "tsx src/cli/token-refresh.ts",
     "report:trend": "tsx src/cli/report-trend.ts",
     "db:clear": "tsx src/cli/db-clear.ts",
