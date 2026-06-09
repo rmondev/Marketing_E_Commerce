@@ -1,6 +1,6 @@
 import { Command } from "commander";
-import { db } from "../db/client.js";
-import { generateTrendReport } from "../reports/trend-generator.js";
+import { db } from "../core/db/client.js";
+import { generateTrendReport } from "../platforms/instagram/trend-report.js";
 
 const program = new Command();
 program

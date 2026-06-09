@@ -5,14 +5,14 @@
 // This is NOT a unit test — it makes real network calls. Use sparingly to
 // verify the wrapper works against live data before wiring it into commands.
 
-import { env } from "../lib/env.js";
-import { resolveMediaType } from "../types/instagram.js";
+import { env } from "../../core/lib/env.js";
+import { resolveMediaType } from "./types.js";
 import {
   getAccountInsights,
   getAccountProfile,
   getMediaInsights,
   listRecentMedia,
-} from "./instagram.js";
+} from "./api.js";
 
 const igId = env.META_INSTAGRAM_BUSINESS_ACCT_ID;
 const token = env.META_PAGE_ACCESS_TOKEN;

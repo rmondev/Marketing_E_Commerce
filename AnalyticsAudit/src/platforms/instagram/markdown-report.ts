@@ -1,11 +1,11 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { db } from "../db/client.js";
+import { db } from "../../core/db/client.js";
 import {
   toReadableEtDate,
   toReadableEtTimestamp,
   toShortReadableEt,
-} from "../lib/time.js";
+} from "../../core/lib/time.js";
 import {
   CAPTION_PREVIEW_CHARS,
   DEMOGRAPHIC_DIMENSIONS_ORDER,
@@ -18,7 +18,7 @@ import {
   formatEr,
   hashtagSearchUrl,
   truncateCaption,
-} from "./_shared.js";
+} from "../../core/reports/_shared.js";
 
 export type ClientRef = {
   id: number;

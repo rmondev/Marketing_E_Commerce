@@ -14,7 +14,7 @@ import {
   type DemographicDimension,
   type MediaItem,
   type MediaType,
-} from "../types/instagram.js";
+} from "./types.js";
 
 const BASE_URL = "https://graph.facebook.com/v25.0";
 

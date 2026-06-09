@@ -1,8 +1,8 @@
 import { Command } from "commander";
 import { createInterface } from "node:readline/promises";
 import { z } from "zod";
-import { db } from "../db/client.js";
-import { askMasked, maskToken } from "../lib/prompt.js";
+import { db } from "../core/db/client.js";
+import { askMasked, maskToken } from "../core/lib/prompt.js";
 
 const nameSchema = z.string().trim().min(1, "must be non-empty");
 const shortNameSchema = z

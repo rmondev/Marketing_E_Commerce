@@ -5,10 +5,10 @@ import {
   getAudienceDemographics,
   getMediaInsights,
   listRecentMedia,
-} from "../api/instagram.js";
-import { db } from "../db/client.js";
-import { toEtTimestamp } from "../lib/time.js";
-import { generateReport } from "../reports/generator.js";
+} from "../platforms/instagram/api.js";
+import { db } from "../core/db/client.js";
+import { toEtTimestamp } from "../core/lib/time.js";
+import { generateReport } from "../platforms/instagram/markdown-report.js";
 import {
   AUDIENCE_TYPES,
   DEMOGRAPHIC_DIMENSIONS,
@@ -17,7 +17,7 @@ import {
   type DemographicDimension,
   type MediaItem,
   type MediaType,
-} from "../types/instagram.js";
+} from "../platforms/instagram/types.js";
 
 // Account-level insights are always a 7-day window — that is the meaning of
 // the `account_metrics.reach` and `account_metrics.profile_views` columns

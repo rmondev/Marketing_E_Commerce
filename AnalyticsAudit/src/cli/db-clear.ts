@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { copyFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { db } from "../db/client.js";
+import { db } from "../core/db/client.js";
 
 // Dry-run by default. Two opt-in destructive modes:
 //   --confirm                       → wipe snapshot history, preserve clients

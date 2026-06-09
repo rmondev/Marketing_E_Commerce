@@ -5,11 +5,11 @@ import {
   debugToken,
   exchangeForLongLivedToken,
   getPageAccessToken,
-} from "../api/instagram.js";
-import { db } from "../db/client.js";
-import { env } from "../lib/env.js";
-import { askMasked, maskToken } from "../lib/prompt.js";
-import { toEtTimestamp } from "../lib/time.js";
+} from "../platforms/instagram/api.js";
+import { db } from "../core/db/client.js";
+import { env } from "../core/lib/env.js";
+import { askMasked, maskToken } from "../core/lib/prompt.js";
+import { toEtTimestamp } from "../core/lib/time.js";
 
 const ENV_FILE = ".env.local";
 

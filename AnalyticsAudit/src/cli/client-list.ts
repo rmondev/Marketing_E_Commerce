@@ -1,4 +1,4 @@
-import { db } from "../db/client.js";
+import { db } from "../core/db/client.js";
 
 interface Row {
   id: number;

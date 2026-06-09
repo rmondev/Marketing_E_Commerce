@@ -1,13 +1,13 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { db } from "../db/client.js";
+import { db } from "../../core/db/client.js";
 import {
   toEtTimestamp,
   toLongDateEt,
   toReadableEtTimestamp,
   toShortReadableEt,
-} from "../lib/time.js";
-import type { ClientRef } from "./generator.js";
+} from "../../core/lib/time.js";
+import type { ClientRef } from "./markdown-report.js";
 import {
   DEMOGRAPHIC_DIMENSIONS_ORDER,
   HASHTAGS_PER_ROW,
@@ -21,7 +21,7 @@ import {
   hashtagSearchUrl,
   topNplusOther,
   truncateCaption,
-} from "./_shared.js";
+} from "../../core/reports/_shared.js";
 
 const WINDOW_SIZE = 4;
 
