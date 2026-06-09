@@ -267,6 +267,10 @@ function renderHtml(input: RenderInput): string {
   const generatedAtIso = new Date().toISOString();
   const generatedReadable = toReadableEtTimestamp(generatedAtIso);
   const generatedCompact = toEtTimestamp(generatedAtIso);
+  // Eyebrow date reflects the latest snapshot (when the data is from), not
+  // when the HTML was generated. Falls back to generated date only if the
+  // snapshot is somehow missing a captured_at, which shouldn't happen.
+  const eyebrowDate = toLongDateEt(latest.captured_at);
 
   return `<!doctype html>
 <html lang="en">
@@ -274,6 +278,9 @@ function renderHtml(input: RenderInput): string {
 <meta charset="utf-8">
 <title>Instagram Analytics Audit — ${escapeHtml(client.display_name)} (Trend)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root {
     color-scheme: light dark;
@@ -288,9 +295,21 @@ function renderHtml(input: RenderInput): string {
   @media (prefers-color-scheme: dark) {
     :root { --border: #3a3d44; --muted: #9ba1ab; --card-bg: rgba(255,255,255,0.04); --accent: #82a8d3; }
   }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         max-width: 1180px; margin: 2rem auto; padding: 0 1.25rem; line-height: 1.55; }
-  h1 { margin: 0 0 0.5rem; font-size: 1.7rem; }
+  body { font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 1180px; margin: 2rem auto; padding: 0 1.25rem; line-height: 1.55;
+         font-feature-settings: "cv11", "ss01"; }
+  /* Two-tier report header. Eyebrow line names the report type + capture
+     date in small uppercase accent-colored text; title is the client
+     display name in a softly-accented large weight. Thin divider line
+     beneath separates the header block from the meta-info card below. */
+  .report-header { margin: 0 0 1.5rem; padding-bottom: 1.1rem;
+                   border-bottom: 1px solid var(--border); }
+  .report-eyebrow { margin: 0 0 0.6rem; font-size: 0.98rem; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.14em;
+                    color: var(--accent); }
+  .report-title { margin: 0; font-size: 2.7rem; font-weight: 700;
+                  letter-spacing: -0.02em; line-height: 1.05;
+                  color: var(--accent); }
   h2 { margin: 2.5rem 0 0.75rem; font-size: 1.35rem; }
   h3 { margin: 1.75rem 0 0.75rem; font-size: 1.05rem; color: var(--muted);
        text-transform: uppercase; letter-spacing: 0.04em; }
@@ -410,7 +429,10 @@ function renderHtml(input: RenderInput): string {
 </style>
 </head>
 <body>
-  <h1>Instagram Analytics Audit — ${escapeHtml(client.display_name)}</h1>
+  <header class="report-header">
+    <p class="report-eyebrow">Instagram Analytics Audit Report · ${escapeHtml(eyebrowDate)}</p>
+    <h1 class="report-title">${escapeHtml(client.display_name)}</h1>
+  </header>
 
   ${renderHeaderInfo(generatedReadable, latest, prior, snapshots.length)}
 
