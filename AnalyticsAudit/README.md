@@ -108,6 +108,7 @@ A timestamped backup of `data/analytics.db` is written before any deletion (`dat
 | `reports/<short-name>_trend.html` | HTML trend report (gitignored). Overwritten by each `report:trend` run. |
 | `src/core/db/schema.sql` | Schema applied idempotently on every DB connection. |
 | `.env.local` | Credentials (gitignored). `.env.example` is the committed template. |
+| `docs/ARCHITECTURE.md` | Current shape of the system — mental model, schema, directory layout, platform registry, and "how to add a new platform" cookbook. |
 | `docs/OPERATIONS.md` | Operator runbook — weekly workflow, token refresh, onboarding, debugging. |
 | `docs/NEW_CLIENT_ONBOARDING.md` | Step-by-step walkthrough for adding a new client (Graph Explorer UI flow). |
 | `CONTEXT.md` | Purpose statement + non-goals. The *why* and the deliberate boundaries. |
@@ -162,6 +163,7 @@ AnalyticsAudit/
 │           └── types.ts                  # zod response schemas + MediaType + METRICS_BY_TYPE + AUDIENCE_TYPE_CONFIG
 ├── data/                                 # SQLite (gitignored); pre-multi-platform backup also lives here
 ├── reports/                              # Generated Markdown + HTML (gitignored)
+├── docs/ARCHITECTURE.md                  # System architecture — mental model + schema + registry + cookbook
 ├── docs/OPERATIONS.md                    # Operator runbook
 ├── docs/NEW_CLIENT_ONBOARDING.md         # Step-by-step new-client walkthrough
 ├── .env.example                          # Committed template
