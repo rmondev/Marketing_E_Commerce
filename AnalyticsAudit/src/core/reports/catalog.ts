@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
@@ -60,6 +61,30 @@ export function upsertManifestEntry(
       // disk but that's acceptable for a personal tool.
     }
   }
+
+  // Dedupe by snapshot_id: "one snapshot = one HTML". If we already had an
+  // HTML file for this snapshot under a different name (e.g. an earlier
+  // re-render at a different timestamp), delete the old file and drop its
+  // manifest entry before adding the new one. Multiple files for the same
+  // snapshot would just be redundant copies of the same data.
+  const superseded = manifest.entries.filter(
+    (e) =>
+      e.snapshot_id === entry.snapshot_id && e.filename !== entry.filename,
+  );
+  for (const old of superseded) {
+    const oldFile = resolve(trendDir, old.filename);
+    if (existsSync(oldFile)) {
+      unlinkSync(oldFile);
+      console.log(
+        `  Removed older render of snapshot #${entry.snapshot_id}: ${old.filename}`,
+      );
+    }
+  }
+  manifest.entries = manifest.entries.filter(
+    (e) =>
+      e.snapshot_id !== entry.snapshot_id || e.filename === entry.filename,
+  );
+
   const idx = manifest.entries.findIndex((e) => e.filename === entry.filename);
   if (idx >= 0) {
     manifest.entries[idx] = entry;
@@ -67,6 +92,56 @@ export function upsertManifestEntry(
     manifest.entries.push(entry);
   }
   writeFileSync(path, JSON.stringify(manifest, null, 2), "utf-8");
+}
+
+// Self-heal pass: if the manifest has multiple entries pointing at the same
+// snapshot_id (e.g. left over from before upsertManifestEntry started
+// deduping), collapse them to the newest by generated_at and delete the
+// rest from disk. Idempotent — no-op once clean. Called at the top of
+// generateCatalog.
+function dedupeManifestBySnapshot(
+  trendDir: string,
+  manifest: Manifest,
+): Manifest {
+  const bySnapshot = new Map<number, ManifestEntry[]>();
+  for (const e of manifest.entries) {
+    if (!bySnapshot.has(e.snapshot_id)) bySnapshot.set(e.snapshot_id, []);
+    bySnapshot.get(e.snapshot_id)!.push(e);
+  }
+  const kept: ManifestEntry[] = [];
+  let cleaned = 0;
+  for (const group of bySnapshot.values()) {
+    if (group.length === 1) {
+      kept.push(group[0]!);
+      continue;
+    }
+    // Multiple entries for one snapshot — keep newest generation, delete rest.
+    const sorted = [...group].sort(
+      (a, b) =>
+        new Date(b.generated_at).getTime() -
+        new Date(a.generated_at).getTime(),
+    );
+    kept.push(sorted[0]!);
+    for (const old of sorted.slice(1)) {
+      const oldFile = resolve(trendDir, old.filename);
+      if (existsSync(oldFile)) {
+        unlinkSync(oldFile);
+        cleaned++;
+      }
+    }
+  }
+  if (cleaned > 0) {
+    console.log(
+      `  Catalog: removed ${cleaned} older duplicate HTML(s) (one snapshot = one HTML).`,
+    );
+    const path = resolve(trendDir, MANIFEST_NAME);
+    writeFileSync(
+      path,
+      JSON.stringify({ entries: kept }, null, 2),
+      "utf-8",
+    );
+  }
+  return { entries: kept };
 }
 
 export function generateCatalog(input: {
@@ -92,6 +167,11 @@ export function generateCatalog(input: {
       manifest = { entries: [] };
     }
   }
+
+  // Self-heal: collapse any duplicate-snapshot entries left over from before
+  // upsertManifestEntry started deduping. Writes the cleaned manifest back
+  // and deletes the redundant files.
+  manifest = dedupeManifestBySnapshot(trendDir, manifest);
 
   // Drop entries whose files were manually deleted from disk.
   const validEntries = manifest.entries.filter((e) =>
