@@ -111,9 +111,9 @@ You now have all four values:
 |---|---|
 | Display name | `--name` |
 | `short_name` | `--short-name` |
-| IG Business Account ID (step 3) | `--ig-account-id` |
-| Facebook Page ID (step 2) | `--page-id` |
-| Short-lived Page Token (step 2's `access_token`) | `--page-token` (or paste when prompted) |
+| IG Business Account ID (step 3) | `--instagram-account-id` |
+| Facebook Page ID (step 2) | `--instagram-page-id` |
+| Short-lived Page Token (step 2's `access_token`) | `--instagram-page-token` (or paste when prompted) |
 
 Run interactively:
 
@@ -121,14 +121,39 @@ Run interactively:
 npm run client:add
 ```
 
-The token prompt hides keystrokes — paste once, hit Enter. After you submit, the script prints the inserted row (with a masked token).
+The flow:
+1. Asks for the business display name, short_name, and optional notes.
+2. Asks Y/N for each registered platform with onboarding implemented. Instagram defaults Y; Facebook Page and TikTok default N. Toggle whichever apply.
+3. For each selected platform, prompts for that platform's fields. The token prompt hides keystrokes — paste once, hit Enter.
+4. Prints a summary with the new `platform_account_id` for each platform.
 
-Or fully scripted:
+Or fully scripted (Instagram only):
 
 ```powershell
 npm run client:add -- --name "Symmetry Esthetics" --short-name symmetry-esthetics `
-  --ig-account-id 17841... --page-id 1234... --page-token EAA...
+  --platform instagram `
+  --instagram-account-id 17841... --instagram-page-id 1234... --instagram-page-token EAA...
 ```
+
+Or with multiple platforms at once:
+
+```powershell
+npm run client:add -- --name "Symmetry Esthetics" --short-name symmetry-esthetics `
+  --platform instagram --instagram-account-id 17841... --instagram-page-id 1234... --instagram-page-token EAA... `
+  --platform facebook_page --facebook-page-id 1234... --facebook-page-token EAA...
+```
+
+> **Per-platform flags are namespaced** (`--instagram-*`, `--facebook-page-*`, `--tiktok-*`) so they're unambiguous when you onboard multiple platforms in the same command. The old single-platform `--ig-account-id` / `--page-id` / `--page-token` flags were removed in Phase E.
+
+### Attaching another platform later
+
+If the business signs up for a new channel after the initial onboarding (e.g. they get a TikTok), don't run `client:add` again — that creates a new business. Use:
+
+```powershell
+npm run client:platform:add -- --client symmetry-esthetics
+```
+
+Same per-platform prompts (or `--platform <name>` + per-platform flags for scripted use). Adds one platform_account to the existing client.
 
 > The stored token is short-lived right now (matches your User Token's life). **Do not stop here.** Continue to step 5 *while your User Token is still valid* — `token:refresh` needs that same User Token to derive a long-lived Page Token.
 

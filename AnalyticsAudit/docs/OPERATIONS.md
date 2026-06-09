@@ -176,7 +176,19 @@ GET /<page-id>?fields=instagram_business_account  → returns the IG Business ac
 npm run client:add
 ```
 
-Prompts interactively. The token prompt hides keystrokes — paste once, hit Enter. The `short-name` must be lowercase alphanumeric (`[a-z0-9_-]+`); it becomes the `--client` identifier on the audit command. Pick something memorable.
+Prompts interactively for business fields, then Y/N per registered platform with onboarding implemented (Instagram defaults Y, Facebook Page and TikTok default N), then per-platform credential prompts. Token prompts hide keystrokes — paste once, hit Enter. The `short-name` must be lowercase alphanumeric (`[a-z0-9_-]+`); it becomes the `--client` identifier on the audit command. Pick something memorable.
+
+For scripted onboarding (and multi-platform attaches in one shot), see [NEW_CLIENT_ONBOARDING.md#step-4--add-the-client](NEW_CLIENT_ONBOARDING.md#step-4--add-the-client).
+
+### Attaching another platform later
+
+If a business signs up for an additional channel after the initial onboarding (e.g. they already have Instagram and now also have a Facebook Page):
+
+```powershell
+npm run client:platform:add -- --client <short-name>
+```
+
+Picks a single platform (interactive picker or `--platform <name>`), runs that platform's onboarding, and attaches one new row to `platform_accounts`. The original business and any existing platform_accounts stay untouched.
 
 ### Run the first audit
 
@@ -225,7 +237,7 @@ When onboarding, always ask when the account was converted to Business. If a mea
 | `(#10) Insufficient permissions to access this data` | Token doesn't have `instagram_manage_insights` or `pages_read_engagement`. Re-mint in Explorer ensuring the right scopes are attached to the configuration. |
 | `(#100) since param is not valid. Metrics data is available for the last 2 years` | Account insights window exceeded Graph's 2-year cap. Account insights are fixed at 7d so you shouldn't see this in normal operation — if you do, check for accidental edits to `ACCOUNT_INSIGHTS_WINDOW_DAYS` in `src/cli/audit.ts`. |
 | `No client with short_name '...'` | Run `npm run client:list`. If the client isn't there, add it with `npm run client:add`. |
-| Audit hangs on a prompt | `client:add` was run with missing required flags. Provide all five (`--name`, `--short-name`, `--ig-account-id`, `--page-id`, `--page-token`) for fully scripted use. |
+| Audit hangs on a prompt | `client:add` was run with missing required flags. For fully scripted use, supply all business-level flags (`--name`, `--short-name`) plus every per-platform flag for each selected platform (`--platform instagram --instagram-account-id ... --instagram-page-id ... --instagram-page-token ...`, etc.). Missing required flags now error loudly in non-interactive mode rather than hanging. |
 | `NOT NULL constraint failed: ...` after a schema change | The idempotent migrations in `src/core/db/client.ts` don't cover this case. Drop the affected table and re-run; the schema + migration block will recreate it with the new shape: `npx tsx -e "import('./src/core/db/client.js').then(({db}) => db.exec('DROP TABLE <table>'))"`. **Verify the table is empty or backed up first** — DROP is destructive. |
 | `TypeError` / unexpected null from wrapper | Meta may have changed a response shape. Run `npm run test:instagram` to probe the wrapper end-to-end against the bootstrap account. The output should match the four-section successful run in [src/platforms/instagram/live-test.ts](../src/platforms/instagram/live-test.ts). |
 | Hard-to-diagnose Graph error | The wrapper's `InstagramApiError` carries `httpStatus`, `apiCode`, and `fbtraceId`. Quote the `fbtraceId` to Meta support if needed — it's their request ID for that call. |

@@ -201,10 +201,12 @@ src/
     │   ├── markdown-report.ts                Rolling Markdown report generator
     │   ├── trend-report.ts                   HTML trend report generator
     │   └── types.ts                          zod response schemas + MediaType + METRICS_BY_TYPE + AUDIENCE_TYPE_CONFIG
-    ├── facebook-page/                        Scaffolded; isImplemented=false
-    │   └── index.ts                          Stub PlatformHandle (all functions throw notImplemented)
-    └── tiktok/                               Scaffolded; isImplemented=false
-        └── index.ts                          Stub PlatformHandle (all functions throw notImplemented)
+    ├── facebook-page/                        Onboarding implemented; audit + reports pending
+    │   ├── index.ts                          PlatformHandle with capabilities.onboarding=true
+    │   └── onboarding.ts                     Page ID + Page Access Token prompts
+    └── tiktok/                               Onboarding placeholder; audit + reports pending
+        ├── index.ts                          PlatformHandle with capabilities.onboarding=true
+        └── onboarding.ts                     Handle + paste-token prompts (OAuth flow comes with audit)
 ```
 
 The split is deliberate:
@@ -220,20 +222,20 @@ The split is deliberate:
 
 ```ts
 export const PLATFORMS: Record<string, PlatformHandle> = {
-  instagram: instagramPlatform,           // isImplemented: true
-  facebook_page: facebookPagePlatform,    // isImplemented: false
-  tiktok: tiktokPlatform,                 // isImplemented: false
+  instagram: instagramPlatform,           // audit + reports + onboarding ready
+  facebook_page: facebookPagePlatform,    // onboarding ready; audit + reports pending
+  tiktok: tiktokPlatform,                 // onboarding placeholder; audit + reports pending
 };
 ```
 
-Every CLI that talks to a platform looks it up here:
+Every CLI that talks to a platform looks it up here and dispatches based on the **specific capability** it needs:
 
 ```ts
 const handle = PLATFORMS[pa.platform];
 if (!handle) {
   console.log(`Unknown platform '${pa.platform}' — skipping.`);
-} else if (!handle.isImplemented) {
-  console.log(`${handle.displayName} not yet implemented — skipping.`);
+} else if (!handle.capabilities.audit) {
+  console.log(`${handle.displayName} audit not yet implemented — skipping.`);
 } else {
   const result = await handle.audit({ platformAccount: pa, client, lookbackDays });
 }
@@ -242,18 +244,28 @@ if (!handle) {
 ### The `PlatformHandle` interface
 
 ```ts
+export type PlatformCapabilities = {
+  audit: boolean;
+  reports: boolean;       // markdown + trend report generation
+  onboarding: boolean;
+  tokenRefresh: boolean;
+};
+
 export type PlatformHandle = {
   name: string;                       // Matches platform_accounts.platform (snake_case)
   displayName: string;                // Human-readable: "Instagram", "Facebook Page"
-  isImplemented: boolean;             // CLI checks this before calling the function fields
+  capabilities: PlatformCapabilities; // Per-action flags; CLIs gate on the relevant one
   audit: (input: PlatformAuditInput) => Promise<PlatformAuditResult>;
   generateMarkdownReport: (client: ClientRef) => GenerateReportResult;
   generateTrendReport: (client: ClientRef) => GenerateTrendResult | null;
+  onboarding: (input: PlatformOnboardingInput) => Promise<PlatformOnboardingResult>;
   tokenRefresh: (input: PlatformTokenRefreshInput) => Promise<PlatformTokenRefreshResult>;
 };
 ```
 
-For unimplemented platforms, the function fields throw `notImplemented(platform, what)` immediately if called — but the CLI's `isImplemented` gate means they normally never get invoked. The throw is just a defensive guard for direct programmatic use.
+**Why per-action capabilities** — Facebook Pages can have onboarding implemented well before its audit is built. Splitting into `capabilities.audit`, `capabilities.reports`, `capabilities.onboarding`, `capabilities.tokenRefresh` lets each CLI gate on the specific capability it needs: `cli/audit.ts` checks `capabilities.audit`, `cli/report-trend.ts` checks `capabilities.reports`, `cli/client-add.ts` and `cli/client-platform-add.ts` filter onboardable platforms by `capabilities.onboarding`.
+
+For unimplemented capabilities, the corresponding function fields throw `notImplemented(platform, what)` immediately if called — but the CLI's capability gate means they normally never get invoked. The throw is just a defensive guard for direct programmatic use.
 
 ---
 
@@ -306,9 +318,10 @@ Before Phase C, reports were written to the top of `reports/` (e.g. `reports/sym
 |---|---|
 | `npm run audit -- --client <short>` | Capture a snapshot for every configured platform on this business. `--platform <name>` narrows. `--lookback-days <n>` widens media inclusion. |
 | `npm run report:trend -- --client <short>` | Generate the HTML trend report + regenerate the catalog for every platform. `--platform <name>` narrows. |
-| `npm run client:add` | Onboard a new business + its IG platform_account. (Phase E will make this multi-platform.) |
-| `npm run client:list` | Tabular list of businesses with their last_snapshot (across all platforms). |
-| `npm run token:refresh` | Mint a fresh Page Access Token for an IG platform_account, update the credentials JSON, optionally rewrite `.env.local`. Currently IG-only. |
+| `npm run client:add` | Onboard a new business + one or more platform_accounts. Interactive by default (Y/N per registered platform); fully scriptable via namespaced flags (`--instagram-account-id`, `--facebook-page-id`, `--tiktok-handle`, etc.) |
+| `npm run client:platform:add -- --client <short>` | Attach a new platform_account to an existing business. The "this business just signed up for TikTok too" command. |
+| `npm run client:list` | Tabular list of businesses with a PLATFORMS column (comma-list per row) and their last_snapshot across all platforms. |
+| `npm run token:refresh` | Mint a fresh Page Access Token for an IG platform_account, update the credentials JSON, optionally rewrite `.env.local`. Currently IG-only; not yet registry-dispatched. |
 | `npm run db:clear` | Wipe the DB. Dry-run by default; gated prompts for destructive variants. |
 | `npm run test:instagram` | Live API smoke test against the bootstrap account in `.env.local`. |
 | `npm run typecheck` | `tsc --noEmit`. |
@@ -316,7 +329,7 @@ Before Phase C, reports were written to the top of `reports/` (e.g. `reports/sym
 
 Per-platform CLI behaviour:
 - Unknown platform → error with `client:list` hint.
-- Known but `isImplemented=false` → friendly skip message; the loop continues.
+- Known platform but the relevant `capabilities.*` flag is false → friendly skip message; the loop continues. E.g. an audit run on a Facebook Page platform_account today prints "Facebook Page audit not yet implemented — skipping."
 - Implementation error → caught, shown in the final Summary table; the loop continues; non-zero exit code.
 
 ---
@@ -329,15 +342,16 @@ This is what Phase D was designed for. Adding a new platform is purely additive.
 
 ```
 src/platforms/linkedin/
-├── api.ts          ← LinkedIn Marketing API wrapper
-├── audit.ts        ← runLinkedInAudit(input: PlatformAuditInput): Promise<PlatformAuditResult>
-├── index.ts        ← the PlatformHandle export
+├── api.ts             ← LinkedIn Marketing API wrapper
+├── audit.ts           ← runLinkedInAudit(input: PlatformAuditInput): Promise<PlatformAuditResult>
+├── index.ts           ← the PlatformHandle export
 ├── markdown-report.ts
+├── onboarding.ts      ← onboardLinkedIn(input: PlatformOnboardingInput): Promise<PlatformOnboardingResult>
 ├── trend-report.ts
-└── types.ts        ← zod schemas for LinkedIn responses
+└── types.ts           ← zod schemas for LinkedIn responses
 ```
 
-Use [src/platforms/instagram/](../src/platforms/instagram/) as the template. The two reports can copy generously from IG since their visual language is shared.
+Use [src/platforms/instagram/](../src/platforms/instagram/) as the template. The two reports can copy generously from IG since their visual language is shared. The onboarding file can crib from [instagram/onboarding.ts](../src/platforms/instagram/onboarding.ts) — same resolveField pattern, just different prompt labels and flag names.
 
 ### Step 2 — Author the audit function
 
@@ -380,18 +394,27 @@ export async function runLinkedInAudit(
 import type { PlatformHandle } from "../_registry.js";
 import { runLinkedInAudit } from "./audit.js";
 import { generateReport } from "./markdown-report.js";
+import { onboardLinkedIn } from "./onboarding.js";
 import { generateTrendReport } from "./trend-report.js";
 
 export const linkedInPlatform: PlatformHandle = {
   name: "linkedin",
   displayName: "LinkedIn",
-  isImplemented: true,
+  capabilities: {
+    audit: true,
+    reports: true,
+    onboarding: true,
+    tokenRefresh: false,   // hook in later when token-refresh becomes registry-aware
+  },
   audit: runLinkedInAudit,
   generateMarkdownReport: generateReport,
   generateTrendReport,
+  onboarding: onboardLinkedIn,
   tokenRefresh: /* … */,
 };
 ```
+
+If LinkedIn audit isn't ready yet but you want to onboard ahead of time, just set `capabilities.audit: false`. The `npm run audit` loop will skip LinkedIn with a friendly message until you flip the flag.
 
 ### Step 4 — Register it
 
@@ -409,11 +432,10 @@ export const PLATFORMS: Record<string, PlatformHandle> = {
 
 ### Step 5 — Onboard a client with it
 
-After Phase E lands, `npm run client:add` will offer LinkedIn as a checkbox in the multi-select. Until then, attach manually:
+`npm run client:add` automatically picks LinkedIn up from the registry and offers it as a Y/N prompt during interactive onboarding. For scripted onboarding, namespace the LinkedIn-specific flags (`--linkedin-org-id`, `--linkedin-access-token`) and parse them in onboarding.ts. To attach LinkedIn to an *existing* business:
 
-```sql
-INSERT INTO platform_accounts (client_id, platform, external_account_id, credentials, added_at)
-VALUES (?, 'linkedin', '<linkedin-org-id>', '{"access_token": "..."}', datetime('now'));
+```powershell
+npm run client:platform:add -- --client <short> --platform linkedin --linkedin-org-id ... --linkedin-access-token ...
 ```
 
 ### Step 6 — Audit
@@ -422,7 +444,7 @@ VALUES (?, 'linkedin', '<linkedin-org-id>', '{"access_token": "..."}', datetime(
 npm run audit -- --client <short> --platform linkedin
 ```
 
-The CLI loop picks up the new platform_account, looks it up in PLATFORMS, finds `isImplemented=true`, calls `runLinkedInAudit`, and you have your first snapshot.
+The CLI loop picks up the new platform_account, looks it up in PLATFORMS, finds `capabilities.audit=true`, calls `runLinkedInAudit`, and you have your first snapshot.
 
 ### What you *don't* need to change
 

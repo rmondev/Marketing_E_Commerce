@@ -37,22 +37,40 @@ cp .env.example .env.local
 
 ### `npm run client:add`
 
-Add a client. Prompts interactively for each field (token prompt hides keystrokes). Pass any value via CLI flag to skip its prompt:
+Onboard a new business and attach one or more platform_accounts. Interactive by default: prompts for business fields, then Y/N per registered platform with onboarding implemented, then per-platform credential prompts (token prompts hide keystrokes). Any field can be passed as a flag to skip its prompt.
 
 ```powershell
-# Interactive
+# Fully interactive — walks through everything
 npm run client:add
 
-# Fully scripted
+# Fully scripted — Instagram + Facebook Page in one go
 npm run client:add -- --name "Riccardo Moncada (rmon.dev)" --short-name rmondev `
-  --ig-account-id 17841... --page-id 1135... --page-token EAA...
+  --platform instagram --instagram-account-id 17841... --instagram-page-id 1135... --instagram-page-token EAA... `
+  --platform facebook_page --facebook-page-id 1135... --facebook-page-token EAA...
 ```
+
+Per-platform flags are namespaced (`--instagram-account-id`, `--facebook-page-id`, `--tiktok-handle`, etc.) so they're unambiguous when onboarding multiple platforms in the same command. `--platform <name>` is repeatable.
 
 `short-name` must be lowercase alphanumeric (`[a-z0-9_-]+`). It becomes the `--client` identifier on the `audit` command.
 
+### `npm run client:platform:add -- --client <short-name>`
+
+Attach a new platform_account to an *existing* business. Symmetric with `client:add` but scoped to one platform.
+
+```powershell
+# Add TikTok to symmetry-esthetics interactively
+npm run client:platform:add -- --client symmetry-esthetics
+
+# Add Facebook Page scripted
+npm run client:platform:add -- --client symmetry-esthetics --platform facebook_page `
+  --facebook-page-id 1135... --facebook-page-token EAA...
+```
+
+If the platform's audit isn't implemented yet, the platform_account row is created with a heads-up that `npm run audit` will skip it until the audit lands.
+
 ### `npm run client:list`
 
-Tabular list of every configured client with the timestamp of its last snapshot.
+Tabular list of every configured business with the comma-separated list of its attached platforms and the timestamp of its last snapshot across any platform.
 
 ### `npm run token:refresh`
 
@@ -60,19 +78,26 @@ Refresh an expired (or about-to-expire) Page Access Token. Exchanges a short-liv
 
 ### `npm run report:trend -- --client <short-name>`
 
-Renders an HTML trend report from snapshots already stored in SQLite. Does not hit the API. Headline comparison is the latest snapshot vs the one before it; the last 4 snapshots provide trend context (per-metric sparklines, per-post likes evolution). Audience demographics render as donut charts. Output is `reports/<short-name>_trend.html` — open it in a browser. Charts are powered by Chart.js loaded from a CDN, so an internet connection is needed the first time you open the file.
+Renders an HTML trend report from snapshots already stored in SQLite. Does not hit the API. Runs once per configured platform on the business (use `--platform <name>` to narrow). Each invocation writes a new timestamped HTML in `reports/<client>/<platform>/trend/` and regenerates an `index.html` catalog in the same directory — the catalog is your navigation entry point. Charts are powered by Chart.js loaded from a CDN, so an internet connection is needed the first time you open the file.
 
 ```powershell
+# Every configured platform
 npm run report:trend -- --client rmondev
+
+# Just one platform
+npm run report:trend -- --client rmondev --platform instagram
 ```
 
 ### `npm run audit -- --client <short-name>`
 
-The primary command. Fetches live data, stores a snapshot in the database, generates a Markdown report.
+The primary command. Iterates over every configured platform on the business and dispatches each through the platform registry. Platforms whose audit isn't implemented yet are gracefully skipped. Stores a snapshot per successful platform and regenerates that platform's Markdown report.
 
 ```powershell
-# Standard weekly audit
+# Standard weekly audit across all configured platforms
 npm run audit -- --client rmondev
+
+# One platform only
+npm run audit -- --client rmondev --platform instagram
 
 # Backfill: widen the media inclusion window (account insights stay 7-day fixed)
 npm run audit -- --client rmondev --lookback-days 365
@@ -141,26 +166,39 @@ npx tsx -e "import('./src/core/db/client.js').then(({ db }) => db.exec('DROP TAB
 AnalyticsAudit/
 ├── src/
 │   ├── cli/                              # Entry points for `npm run <command>` — platform-agnostic orchestrators
-│   │   ├── audit.ts                      # Primary command — fetch a snapshot, persist, regenerate Markdown report
-│   │   ├── client-add.ts                 # Interactive business + platform_account onboarding
-│   │   ├── client-list.ts                # Tabular list of businesses with last_snapshot
+│   │   ├── audit.ts                      # Iterate platforms, dispatch each via registry, capture snapshots
+│   │   ├── client-add.ts                 # Onboard a business + N platform_accounts (interactive or scripted)
+│   │   ├── client-list.ts                # Tabular list of businesses with PLATFORMS column + last_snapshot
+│   │   ├── client-platform-add.ts        # Attach a new platform to an existing business
 │   │   ├── db-clear.ts                   # Wipe DB (dry-run by default, gated prompts for destructive ops)
-│   │   ├── report-trend.ts               # Render HTML trend report from existing snapshots
-│   │   └── token-refresh.ts              # Mint a fresh Page Access Token, update platform_accounts.credentials
+│   │   ├── report-trend.ts               # Iterate platforms, regenerate timestamped HTML + catalog per platform
+│   │   └── token-refresh.ts              # Mint a fresh Page Access Token, update platform_accounts.credentials (IG-only for now)
 │   ├── core/                             # Platform-agnostic guts shared by every platform
 │   │   ├── db/client.ts                  # better-sqlite3 connection + schema init + idempotent migrations
 │   │   ├── db/schema.sql                 # Applied idempotently per connection
 │   │   ├── lib/env.ts                    # dotenv + zod env validation
 │   │   ├── lib/prompt.ts                 # Hidden-input prompt for tokens
 │   │   ├── lib/time.ts                   # UTC → ET presentation helpers (multiple readable formats)
-│   │   └── reports/_shared.ts            # Cross-platform report helpers (hashtag extraction, country/gender expansion, ER, top-N rollup)
+│   │   └── reports/
+│   │       ├── _shared.ts                # Cross-platform report helpers (hashtag extraction, country/gender expansion, ER, top-N rollup)
+│   │       └── catalog.ts                # Trend report archive catalog (index.html, manifest, orphan migration)
 │   └── platforms/                        # One subdirectory per supported platform
-│       └── instagram/                    # Future: facebook-page/, tiktok/, youtube-shorts/
-│           ├── api.ts                    # Graph API wrapper, retries, InstagramApiError
-│           ├── live-test.ts              # Live smoke test against the bootstrap account
-│           ├── markdown-report.ts        # Markdown rolling-report builder
-│           ├── trend-report.ts           # HTML trend report builder (Chart.js, donuts, sparklines)
-│           └── types.ts                  # zod response schemas + MediaType + METRICS_BY_TYPE + AUDIENCE_TYPE_CONFIG
+│       ├── _registry.ts                  # Central PLATFORMS map + PlatformHandle interface — CLIs dispatch here
+│       ├── instagram/                    # Fully implemented (audit + reports + onboarding)
+│       │   ├── api.ts                    # Graph API wrapper, retries, InstagramApiError
+│       │   ├── audit.ts                  # runInstagramAudit — captures snapshot + regenerates markdown
+│       │   ├── index.ts                  # PlatformHandle export bundling all of the above
+│       │   ├── live-test.ts              # Live smoke test against the bootstrap account
+│       │   ├── markdown-report.ts        # Markdown rolling-report builder
+│       │   ├── onboarding.ts             # IG-specific onboarding prompts (registry-bound)
+│       │   ├── trend-report.ts           # HTML trend report builder (Chart.js, donuts, sparklines)
+│       │   └── types.ts                  # zod response schemas + MediaType + METRICS_BY_TYPE + AUDIENCE_TYPE_CONFIG
+│       ├── facebook-page/                # Onboarding ready; audit + reports pending
+│       │   ├── index.ts                  # PlatformHandle with capabilities.onboarding=true
+│       │   └── onboarding.ts             # Page ID + Page Token prompts
+│       └── tiktok/                       # Onboarding placeholder; audit + reports + OAuth pending
+│           ├── index.ts                  # PlatformHandle with capabilities.onboarding=true
+│           └── onboarding.ts             # Handle + paste-token prompts (OAuth flow comes with audit)
 ├── data/                                 # SQLite (gitignored); pre-multi-platform backup also lives here
 ├── reports/                              # Generated Markdown + HTML (gitignored)
 ├── docs/ARCHITECTURE.md                  # System architecture — mental model + schema + registry + cookbook
