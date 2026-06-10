@@ -4,15 +4,18 @@
 
 import {
   apiErrorEnvelopeSchema,
+  FB_FOLLOWER_DEMOGRAPHIC_METRICS,
   PAGE_REACTIONS_METRIC,
   PAGE_SCALAR_METRICS,
   POST_REACTIONS_METRIC,
   POST_SCALAR_METRICS,
   POST_VIDEO_METRICS,
+  followsInsightsResponseSchema,
   pageInsightsResponseSchema,
   pageProfileSchema,
   postInsightsResponseSchema,
   postsListResponseSchema,
+  type FacebookDemographicDimension,
   type PageProfile,
   type PostItem,
   type ReactionsBreakdown,
@@ -244,6 +247,53 @@ export async function getPostVideoMetrics(
     if (err instanceof FacebookApiError) {
       console.warn(
         `  [post ${postId} video metrics] skipped: ${err.message}` +
+          (err.apiCode !== undefined ? ` (code ${err.apiCode})` : ""),
+      );
+      return null;
+    }
+    throw err;
+  }
+}
+
+// ─── Follower demographics (country / city) ────────────────────────────────
+// Works in dev mode — Meta returns real lifetime aggregate data even
+// without App Review. The response has one values[] entry per day in the
+// requested window, each carrying the same {bucket: count} dict (lifetime
+// cumulative state, not daily delta). We use the most recent end_time.
+//
+// Returns null on Graph API errors AND on the empty-bucket case (a Page
+// below Meta's ~100-person-per-bucket privacy threshold for a given
+// dimension just gets an empty response).
+export async function getPageFollowsDemographics(
+  pageId: string,
+  dimension: FacebookDemographicDimension,
+  token: string,
+  sinceUnix: number,
+  untilUnix: number,
+): Promise<Record<string, number> | null> {
+  const metric = FB_FOLLOWER_DEMOGRAPHIC_METRICS[dimension];
+  const url = buildUrl(`/${pageId}/insights`, {
+    metric,
+    period: "day",
+    since: String(sinceUnix),
+    until: String(untilUnix),
+    access_token: token,
+  });
+  try {
+    const raw = await requestJson(url);
+    const parsed = followsInsightsResponseSchema.parse(raw);
+    const entry = parsed.data[0];
+    if (!entry || entry.values.length === 0) return null;
+    // Pick the most recent end_time (last entry). Meta's API returns days
+    // in chronological order; values without end_time still get treated as
+    // "latest in array" by virtue of being last.
+    const latest = entry.values[entry.values.length - 1]!;
+    if (Object.keys(latest.value).length === 0) return null;
+    return { ...latest.value };
+  } catch (err) {
+    if (err instanceof FacebookApiError) {
+      console.warn(
+        `  [follower_demographics × ${dimension}] skipped: ${err.message}` +
           (err.apiCode !== undefined ? ` (code ${err.apiCode})` : ""),
       );
       return null;

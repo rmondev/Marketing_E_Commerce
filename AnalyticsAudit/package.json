@@ -19,6 +19,7 @@
     "test:facebook-page": "tsx src/platforms/facebook-page/live-test.ts",
     "probe:facebook-page": "tsx src/platforms/facebook-page/probe-metrics.ts",
     "debug:facebook-page": "tsx src/platforms/facebook-page/debug-raw.ts",
+    "probe:fb-insights": "tsx src/platforms/facebook-page/probe-insights.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

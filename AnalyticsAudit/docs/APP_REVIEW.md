@@ -34,13 +34,26 @@ We probed the live API with a fully-scoped Page Access Token (`debug_token` conf
 
 ### Deprecated by Meta in Graph v22+ (returns code 100: "value must be a valid insights metric")
 
-Page-level demographic metrics — all gone:
+The legacy demographic metric family is gone:
 
 - `page_fans_gender_age`, `page_fans_country`, `page_fans_city`, `page_fans_locale`
 - `page_fans_by_country`, `page_fans_by_gender`, `page_fans` (lifetime fan count)
 - `page_engaged_users`, `page_consumptions`, `page_negative_feedback`
 
-These will **not** come back after App Review. The data is only viewable in Meta Business Suite UI now. There's no v25 API path for FB Page demographics.
+### Partial revival via the page_follows_* series (verified 2026-06-09)
+
+Meta replaced *some* of the killed `page_fans_*` series with `page_follows_*` equivalents. The replacements are not consistently surfaced in Meta's main `/insights/` reference table, but they ARE listed on the [deprecated-metrics page](https://developers.facebook.com/docs/platforminsights/page/deprecated-metrics) and they **work in development mode** (no App Review required for the country dimension). Verified empirically — see [src/platforms/facebook-page/probe-insights.ts](../src/platforms/facebook-page/probe-insights.ts) for the probe:
+
+| Metric | Verdict on symmetry-esthetics | Notes |
+|---|---|---|
+| `page_follows_country` | ✓✓ WORKS — 11 countries returned (CA 258, US 10, IN 5, AU 3, AE 2, PK 2, six others) | Use `period=day` (period=lifetime returns empty). Meta repeats the lifetime cumulative aggregate for each day in the window; use the latest end_time. |
+| `page_follows_city` | ✓ metric exists, returns empty | The 100-person-per-bucket privacy threshold blocks small pages. Will populate when a city has ≥100 followers. |
+| `page_follows_locale` | ✗ deprecated 2024-03-14 | No replacement. |
+| All `*_by_age_gender_*` | ✗ deprecated 2024-03-14 | No replacement at the Page level. Age/gender data still exists at the **video-post level** via `post_video_view_time_by_age_bucket_and_gender` (`period=lifetime`) — untested on symmetry-esthetics (no video posts), but documented as alive. |
+
+The audit captures `page_follows_country` and `page_follows_city` on every FB Page snapshot. Captured data lands in the same `demographic_breakdowns` table the IG audit uses, keyed by `(audience_type=follower, dimension=country|city)`. Reports render a country donut chart matching the IG audience-block visual language.
+
+Meta's docs warn of a further deprecation wave around **2026-06-15**, so any `WORKS` metric should be considered short-lived. The persistence layer treats demographic rows as optional — disappearance is graceful.
 
 #### View-based replacements — also dead (exhaustive probe 2026-06-09)
 
@@ -61,7 +74,9 @@ This is **wrong as of Graph v25**. We ran an exhaustive 37-call probe (see [debu
 
 35 out of 37 tests returned code 100 (the only 2 successes were the sanity checks). This is the unambiguous Meta error for "this metric name does not exist in our registry" — distinct from code 10 (permission denied) and from HTTP 200 with empty data (silent suppression for unscoped access).
 
-Conclusion: **FB Page demographics are unrecoverable from the Graph API.** Downgrading the API version, switching parameter combinations, or trying alternate spellings will not help — Meta uses unversioned, global deprecation. Sources claiming otherwise are either stale (the metric names were valid at some point in 2024-2025 and got removed silently) or AI-generated guesses from outdated training data. Do not chase demographic metric replacements. The data is only viewable in Meta Business Suite UI; App Review will not unlock it either.
+Conclusion: **the `page_views_by_*` family is conclusively dead.** Downgrading the API version, switching parameter combinations, or trying alternate spellings in this family will not help — Meta uses unversioned, global deprecation. Sources claiming these specific metric names work are stale.
+
+**However**, the *correct* replacement turned out to be the `page_follows_*` series (not the view-based names) — see [Partial revival via the page_follows_* series](#partial-revival-via-the-page_follows_-series-verified-2026-06-09) above. Verified empirically and now wired into the audit. Country works in dev mode; city works above the 100-person threshold; age/gender are still permanently dead at the page level.
 
 ### Bonus rules discovered
 

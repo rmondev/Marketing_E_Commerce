@@ -16,7 +16,10 @@ import {
 import { migrateLegacyOrphans } from "../../core/reports/catalog.js";
 import {
   CAPTION_PREVIEW_CHARS,
+  DEMOGRAPHIC_TOP_N,
+  expandBucketLabel,
   extractHashtags,
+  topNplusOther,
   truncateCaption,
 } from "../../core/reports/_shared.js";
 import type { ClientRef, GenerateReportResult } from "../instagram/markdown-report.js";
@@ -55,6 +58,13 @@ type PostRow = {
   permalink: string;
   published_at: string;
   is_supplemental: number;
+};
+
+type DemographicRow = {
+  audience_type: string;
+  dimension: string;
+  bucket: string;
+  value: number;
 };
 
 const REPORTS_DIR = resolve("reports");
@@ -261,9 +271,83 @@ function renderSnapshotSection(
     lines.push("");
   }
 
+  const demographics = db
+    .prepare(
+      `SELECT audience_type, dimension, bucket, value
+         FROM demographic_breakdowns
+         WHERE snapshot_id = ?`,
+    )
+    .all(snap.id) as DemographicRow[];
+  lines.push(renderAudienceSection(demographics));
+  lines.push("");
+
   lines.push(renderPostsTable(posts));
   lines.push("");
 
+  return lines.join("\n");
+}
+
+function renderAudienceSection(rows: DemographicRow[]): string {
+  const lines: string[] = [];
+  lines.push("### Audience");
+  lines.push("");
+  if (rows.length === 0) {
+    lines.push(
+      "*No demographic data this snapshot — Page may be below Meta's ~100-person privacy threshold for both country and city dimensions.*",
+    );
+    return lines.join("\n");
+  }
+
+  const byDimension = new Map<string, DemographicRow[]>();
+  for (const r of rows) {
+    if (r.audience_type !== "follower") continue;
+    if (!byDimension.has(r.dimension)) byDimension.set(r.dimension, []);
+    byDimension.get(r.dimension)!.push(r);
+  }
+
+  lines.push(
+    "**Follower locations** (lifetime aggregate from Meta — same value persists across the audit window until followers move).",
+  );
+  lines.push("");
+
+  for (const dim of ["country", "city"] as const) {
+    const bucketRows = byDimension.get(dim);
+    if (!bucketRows || bucketRows.length === 0) {
+      lines.push(
+        `- **${dim === "country" ? "Top Countries" : "Top Cities"}:** *No data (likely below Meta's 100-person privacy threshold).*`,
+      );
+      continue;
+    }
+    const total = bucketRows.reduce((s, r) => s + r.value, 0);
+    const buckets = bucketRows.map((r) => ({
+      bucket: r.bucket,
+      value: r.value,
+    }));
+    const { head, otherValue, otherCount } = topNplusOther(
+      buckets,
+      DEMOGRAPHIC_TOP_N,
+    );
+    const parts: string[] = [];
+    for (const b of head) {
+      const label = expandBucketLabel(dim, b.bucket);
+      const pct =
+        total > 0 ? ` (${Math.round((b.value / total) * 100)}%)` : "";
+      parts.push(`${label}: ${b.value}${pct}`);
+    }
+    if (otherCount > 0) {
+      const pct =
+        total > 0 ? ` (${Math.round((otherValue / total) * 100)}%)` : "";
+      parts.push(`Other (${otherCount} more): ${otherValue}${pct}`);
+    }
+    lines.push(
+      `- **${dim === "country" ? "Top Countries" : "Top Cities"}:** ${parts.join(" · ")}`,
+    );
+  }
+
+  lines.push("");
+  lines.push(
+    "*Note: Age and gender breakdowns at the Page level were deprecated by Meta in March 2024 with no API replacement.*",
+  );
   return lines.join("\n");
 }
 

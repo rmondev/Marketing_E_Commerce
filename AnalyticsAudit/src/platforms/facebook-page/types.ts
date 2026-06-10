@@ -188,11 +188,62 @@ export const apiErrorEnvelopeSchema = z.object({
   }),
 });
 
-// ─── Note on demographics ───────────────────────────────────────────────────
-// Page-level demographic metrics (page_fans_gender_age, page_fans_country,
-// page_fans_city, page_fans_locale) were DEPRECATED in Graph v22+. Verified
-// removed from v25 via probe — they return code 100 "invalid insights
-// metric" regardless of permissions. The data only exists in Meta Business
-// Suite now; there is no API path to recover it. Even App Review can't
-// unlock these. Demographics are deliberately omitted from the FB Page
-// audit and from these types.
+// ─── Demographics ──────────────────────────────────────────────────────────
+//
+// Status as of 2026-06-09 (verified empirically via probe-insights.ts):
+//
+//   ✓✓ page_follows_country — WORKS, real lifetime follower-by-country data
+//      returned even in dev mode (no App Review required). Confirmed against
+//      symmetry-esthetics: 11 countries, dominated by CA(258), US(10).
+//
+//   ✓  page_follows_city — metric exists (returns 200) but data is empty
+//      for Pages below the ~100-person-per-bucket privacy threshold. For a
+//      page with enough city concentration it will populate.
+//
+//   ✗  age/gender at page level — DEAD. All page_fans_*_age_gender,
+//      page_views_by_age_gender, page_impressions_by_age_gender, and 24
+//      variants tested return code 100. Meta deprecated these globally in
+//      March 2024 with no API replacement.
+//
+//   ?  Video-post age/gender/geo (post_video_view_time_by_*) — UNTESTED on
+//      Symmetry (no video posts). Should work for Pages with native video
+//      content. Implementation deferred until a client has video to test
+//      against.
+//
+// Both surviving metrics MUST use period=day (period=lifetime returns
+// data: []). Each day's value in the response is the cumulative lifetime
+// state — we use the most recent end_time entry as the canonical snapshot.
+
+// page_follows_country / page_follows_city return:
+//   data[0].values[].value = { ISO_COUNTRY_CODE_OR_CITY_NAME: count }
+// One values[] entry per day in the requested window; we read the last
+// (most recent) and ignore the rest.
+const followsBucketMapSchema = z.record(z.string(), z.number().int().nonnegative());
+
+const followsInsightEntrySchema = z.object({
+  name: z.string(),
+  period: z.string(),
+  values: z.array(
+    z.object({ value: followsBucketMapSchema, end_time: z.string().optional() }),
+  ),
+});
+
+export const followsInsightsResponseSchema = z.object({
+  data: z.array(followsInsightEntrySchema),
+});
+
+export const FB_AUDIENCE_TYPES = ["follower"] as const;
+export type FacebookAudienceType = (typeof FB_AUDIENCE_TYPES)[number];
+
+export const FB_DEMOGRAPHIC_DIMENSIONS = ["country", "city"] as const;
+export type FacebookDemographicDimension = (typeof FB_DEMOGRAPHIC_DIMENSIONS)[number];
+
+// Maps our internal dimension keys to Meta's metric names. Centralized so
+// the audit code dispatches by dimension without hardcoding metric strings.
+export const FB_FOLLOWER_DEMOGRAPHIC_METRICS: Record<
+  FacebookDemographicDimension,
+  string
+> = {
+  country: "page_follows_country",
+  city: "page_follows_city",
+};

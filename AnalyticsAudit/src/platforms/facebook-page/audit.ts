@@ -24,9 +24,19 @@ import type {
   PlatformAuditInput,
   PlatformAuditResult,
 } from "../_registry.js";
-import { getPageProfile, listRecentPosts } from "./api.js";
+import {
+  getPageFollowsDemographics,
+  getPageProfile,
+  listRecentPosts,
+} from "./api.js";
 import { generateFacebookPageReport } from "./markdown-report.js";
-import { resolvePostType, type PostItem, type FacebookPostType } from "./types.js";
+import {
+  FB_DEMOGRAPHIC_DIMENSIONS,
+  resolvePostType,
+  type FacebookDemographicDimension,
+  type FacebookPostType,
+  type PostItem,
+} from "./types.js";
 
 const MAX_POSTS_TO_SCAN = 50;
 const POSTS_PER_REPORT = 5;
@@ -123,6 +133,45 @@ export async function runFacebookPageAudit(
   // getPageReactionsBreakdown. Store insights in post_metrics fields +
   // post_metrics.platform_extras / account_metrics.platform_extras.
 
+  // ─── Follower demographics (works in dev mode) ─────────────────────────
+  // Country/city only. Age/gender are deprecated globally and can't be
+  // recovered. Both dimensions return null when below Meta's ~100-person
+  // privacy threshold (city is almost always empty for small pages).
+  console.log("\n  Fetching follower demographics...");
+  type DemographicCapture = {
+    audienceType: "follower";
+    dimension: FacebookDemographicDimension;
+    buckets: Record<string, number>;
+  };
+  const demographicCaptures: DemographicCapture[] = [];
+  // Reuse the 7-day account-insights window for these calls. Meta returns
+  // the lifetime aggregate regardless, but the endpoint requires a since/until.
+  const nowUnix = Math.floor(now.getTime() / 1000);
+  const demoSinceUnix = nowUnix - 7 * 24 * 60 * 60;
+  for (const dimension of FB_DEMOGRAPHIC_DIMENSIONS) {
+    const buckets = await getPageFollowsDemographics(
+      pageId,
+      dimension,
+      pageAccessToken,
+      demoSinceUnix,
+      nowUnix,
+    );
+    if (buckets !== null) {
+      demographicCaptures.push({
+        audienceType: "follower",
+        dimension,
+        buckets,
+      });
+    }
+  }
+  const demographicRowCount = demographicCaptures.reduce(
+    (sum, c) => sum + Object.keys(c.buckets).length,
+    0,
+  );
+  console.log(
+    `    ${demographicCaptures.length}/${FB_DEMOGRAPHIC_DIMENSIONS.length} dimension(s) returned, ${demographicRowCount} bucket row(s)`,
+  );
+
   // ─── Persist ────────────────────────────────────────────────────────────
 
   const insertSnapshot = db.prepare(
@@ -140,13 +189,18 @@ export async function runFacebookPageAudit(
       is_supplemental, platform_extras
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
+  const insertDemographicBreakdown = db.prepare(`
+    INSERT INTO demographic_breakdowns (
+      snapshot_id, audience_type, dimension, bucket, value
+    ) VALUES (?, ?, ?, ?, ?)
+  `);
 
   const persist = db.transaction((): number => {
     const snapResult = insertSnapshot.run(
       platformAccount.id,
       now.toISOString(),
       lookbackDays,
-      0, // demographics_attempted — FB Page never attempts (deprecated by Meta)
+      1, // demographics_attempted — country/city probed (only follower-side; age/gender deprecated globally)
       null,
     );
     const snapshotId = Number(snapResult.lastInsertRowid);
@@ -190,6 +244,18 @@ export async function runFacebookPageAudit(
       );
     }
 
+    for (const { audienceType, dimension, buckets } of demographicCaptures) {
+      for (const [bucket, value] of Object.entries(buckets)) {
+        insertDemographicBreakdown.run(
+          snapshotId,
+          audienceType,
+          dimension,
+          bucket,
+          value,
+        );
+      }
+    }
+
     return snapshotId;
   });
 
@@ -205,7 +271,9 @@ export async function runFacebookPageAudit(
   console.log(
     `    post_metrics:            ${postsToCapture.length} row(s) (0 with engagement, ${postsToCapture.length} pending App Review, ${supplementalCount} supplemental)`,
   );
-  console.log("    demographic_breakdowns:  0 row(s) (Meta removed FB Page demographics in v22+)");
+  console.log(
+    `    demographic_breakdowns:  ${demographicRowCount} row(s) across ${demographicCaptures.length} dimension(s) (country/city only; age/gender deprecated globally)`,
+  );
 
   const { rollingPath, archivePath } = generateFacebookPageReport({
     client_id: client.id,

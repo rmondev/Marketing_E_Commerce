@@ -39,8 +39,11 @@ import {
 } from "../../core/reports/catalog.js";
 import {
   CAPTION_PREVIEW_CHARS,
+  DEMOGRAPHIC_TOP_N,
   HASHTAGS_PER_ROW,
+  expandBucketLabel,
   extractHashtags,
+  topNplusOther,
   truncateCaption,
 } from "../../core/reports/_shared.js";
 import type { ClientRef } from "../instagram/markdown-report.js";
@@ -79,6 +82,22 @@ type PostDbRow = {
   published_at: string;
   is_supplemental: number;
 };
+
+type DemographicRow = {
+  audience_type: string;
+  dimension: string;
+  bucket: string;
+  value: number;
+};
+
+const DONUT_PALETTE = [
+  "#4e79a7",
+  "#f28e2b",
+  "#e15759",
+  "#76b7b2",
+  "#59a14f",
+  "#edc948",
+];
 
 type FacebookPageExtras = {
   fan_count?: number;
@@ -171,6 +190,14 @@ export function generateFacebookPageTrendReport(
     )
     .all(latest.id) as PostDbRow[];
 
+  const demographicRows = db
+    .prepare(
+      `SELECT audience_type, dimension, bucket, value
+         FROM demographic_breakdowns
+         WHERE snapshot_id = ?`,
+    )
+    .all(latest.id) as DemographicRow[];
+
   const html = renderHtml({
     client,
     snapshots,
@@ -178,6 +205,7 @@ export function generateFacebookPageTrendReport(
     prior,
     accountById,
     latestPosts,
+    demographicRows,
   });
 
   migrateLegacyOrphans(REPORTS_DIR);
@@ -221,10 +249,64 @@ type RenderInput = {
   prior: Snapshot | undefined;
   accountById: Map<number, AccountSummary>;
   latestPosts: PostDbRow[];
+  demographicRows: DemographicRow[];
 };
 
+type DonutChart = {
+  id: string;
+  title: string;
+  labels: string[];
+  data: number[];
+  description: string;
+};
+
+function buildDonuts(rows: DemographicRow[]): DonutChart[] {
+  const byDimension = new Map<string, DemographicRow[]>();
+  for (const r of rows) {
+    if (r.audience_type !== "follower") continue;
+    if (!byDimension.has(r.dimension)) byDimension.set(r.dimension, []);
+    byDimension.get(r.dimension)!.push(r);
+  }
+  const out: DonutChart[] = [];
+  for (const [dim, label, description] of [
+    ["country", "Top Countries", "Countries your followers live in. Lifetime aggregate from Meta. Top 5 + 'Other' rollup; FB returns ~all countries with ≥1 follower."],
+    ["city", "Top Cities", "Metro areas your followers cluster around. Only populates when a city has ≥100 of your followers (Meta privacy threshold). For most small pages this stays empty."],
+  ] as const) {
+    const bucketRows = byDimension.get(dim);
+    if (!bucketRows || bucketRows.length === 0) continue;
+    const buckets = bucketRows.map((r) => ({ bucket: r.bucket, value: r.value }));
+    const { head, otherValue, otherCount } = topNplusOther(
+      buckets,
+      DEMOGRAPHIC_TOP_N,
+    );
+    const labels = head.map((b) => expandBucketLabel(dim, b.bucket));
+    const data = head.map((b) => b.value);
+    if (otherCount > 0) {
+      labels.push(`Other (${otherCount})`);
+      data.push(otherValue);
+    }
+    out.push({
+      id: `donut-follower-${dim}`,
+      title: label,
+      labels,
+      data,
+      description,
+    });
+  }
+  return out;
+}
+
 function renderHtml(input: RenderInput): string {
-  const { client, snapshots, latest, prior, accountById, latestPosts } = input;
+  const {
+    client,
+    snapshots,
+    latest,
+    prior,
+    accountById,
+    latestPosts,
+    demographicRows,
+  } = input;
+  const donuts = buildDonuts(demographicRows);
 
   const chronological = [...snapshots].reverse();
   // Multi-line chart x-axis labels: Chart.js renders each array element on
@@ -350,6 +432,17 @@ function renderHtml(input: RenderInput): string {
                      font-style: italic; }
   .pending-section strong { color: var(--muted); }
 
+  .audience-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                   gap: 1.25rem; }
+  @media (max-width: 720px) { .audience-grid { grid-template-columns: 1fr; } }
+  .donut-card { border: 1px solid var(--border); background: var(--card-bg);
+                padding: 0.9rem; border-radius: 8px; }
+  .donut-title { font-size: 0.9rem; color: var(--accent); margin-bottom: 0.2rem;
+                 text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .donut-desc { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.55rem;
+                line-height: 1.4; }
+  .donut-wrap { height: 240px; position: relative; }
+
   .posts-summary { color: var(--muted); margin-bottom: 0.75rem; font-size: 0.9rem; }
   .posts-table-wrap { overflow-x: auto; margin: 0.5rem 0; }
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums;
@@ -404,9 +497,7 @@ function renderHtml(input: RenderInput): string {
   <div class="kpi-grid">${kpiCards}</div>
 
   <h2>Audience</h2>
-  <div class="pending-section">
-    <strong>Audience demographics unavailable.</strong> Page-level demographic metrics (fan country / city / age / gender) were removed by Meta in Graph v22+. Unlike the engagement metrics below, these will <em>not</em> return after App Review — the data is only viewable in Meta Business Suite. See <code>docs/APP_REVIEW.md</code>.
-  </div>
+  ${renderAudienceSection(donuts)}
 
   <h2>Posts</h2>
   ${renderPostsSection(latestPosts)}
@@ -419,6 +510,8 @@ function renderHtml(input: RenderInput): string {
 <script>
 const sparkSeries = ${JSON.stringify(sparkSeries)};
 const sparkLabels = ${JSON.stringify(chronoLabels)};
+const donuts = ${JSON.stringify(donuts)};
+const donutPalette = ${JSON.stringify(DONUT_PALETTE)};
 
 const sparkOpts = {
   responsive: true, maintainAspectRatio: false,
@@ -435,6 +528,35 @@ for (const [id, data] of Object.entries(sparkSeries)) {
     type: "line",
     data: { labels: sparkLabels, datasets: [{ data, borderColor: "#4e79a7", fill: false }] },
     options: sparkOpts,
+  });
+}
+
+for (const chart of donuts) {
+  const canvas = document.getElementById(chart.id);
+  if (!canvas) continue;
+  const total = chart.data.reduce((s, v) => s + v, 0);
+  new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels: chart.labels,
+      datasets: [{ data: chart.data, backgroundColor: donutPalette, borderWidth: 1 }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      cutout: "55%",
+      plugins: {
+        legend: { position: "right", labels: { boxWidth: 14, font: { size: 13 } } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.parsed;
+              const pct = total > 0 ? Math.round((v / total) * 100) : 0;
+              return ctx.label + ": " + v + " (" + pct + "%)";
+            },
+          },
+        },
+      },
+    },
   });
 }
 
@@ -482,6 +604,32 @@ for (const [id, data] of Object.entries(sparkSeries)) {
 </body>
 </html>
 `;
+}
+
+function renderAudienceSection(donuts: DonutChart[]): string {
+  if (donuts.length === 0) {
+    return `<div class="pending-section">
+  <strong>No demographic data this snapshot.</strong> Meta requires ≥100 unique
+  followers in each bucket (country/city) before releasing demographic data. The
+  Page may currently be below this threshold. Age and gender breakdowns were
+  deprecated globally by Meta in March 2024 and won't return regardless of
+  audience size.
+</div>`;
+  }
+  const cards = donuts
+    .map(
+      (d) => `
+    <div class="donut-card">
+      <div class="donut-title">${escapeHtml(d.title)}</div>
+      <div class="donut-desc">${escapeHtml(d.description)}</div>
+      <div class="donut-wrap"><canvas id="${escapeHtml(d.id)}"></canvas></div>
+    </div>`,
+    )
+    .join("");
+  return `
+  <p class="section-intro">Where your followers live. Lifetime aggregate from Meta — the value reflects current cumulative state, not weekly delta. Country always returns; city only populates when a single city has ≥100 of your followers (Meta's privacy threshold).</p>
+  <div class="audience-grid">${cards}</div>
+  <p class="section-intro" style="margin-top: 1rem; font-style: italic;">Age and gender at the Page level were deprecated by Meta in March 2024 with no API replacement, so those dimensions don't appear here.</p>`;
 }
 
 function renderHeaderInfo(
