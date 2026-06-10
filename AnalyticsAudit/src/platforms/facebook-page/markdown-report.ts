@@ -14,7 +14,11 @@ import {
   toShortReadableEt,
 } from "../../core/lib/time.js";
 import { migrateLegacyOrphans } from "../../core/reports/catalog.js";
-import { CAPTION_PREVIEW_CHARS, truncateCaption } from "../../core/reports/_shared.js";
+import {
+  CAPTION_PREVIEW_CHARS,
+  extractHashtags,
+  truncateCaption,
+} from "../../core/reports/_shared.js";
 import type { ClientRef, GenerateReportResult } from "../instagram/markdown-report.js";
 
 type Snapshot = {
@@ -308,17 +312,18 @@ function renderPostsTable(posts: PostRow[]): string {
     `Captured ${posts.length} post(s): ${inWindowCount} in-window, ${supplementalCount} supplemental (marked \`†\`).`,
   );
   lines.push("");
-  lines.push("| | Type | Posted | Message | Link |");
-  lines.push("|---|---|---|---|---|");
+  lines.push("| | Type | Posted | Message | Hashtags | Link |");
+  lines.push("|---|---|---|---|---|---|");
   for (const p of posts) {
     const supMark = p.is_supplemental === 1 ? "†" : "";
     const messagePreview = truncateCaption(p.caption, MESSAGE_PREVIEW_CHARS);
     const posted = toShortReadableEt(p.published_at);
+    const hashtags = renderHashtagsCell(p.caption);
     const link = p.permalink
       ? `[view](${p.permalink})`
       : "—";
     lines.push(
-      `| ${supMark} | ${p.media_type} | ${posted} | ${escapeTableCell(messagePreview)} | ${link} |`,
+      `| ${supMark} | ${p.media_type} | ${posted} | ${escapeTableCell(messagePreview)} | ${hashtags} | ${link} |`,
     );
   }
   lines.push("");
@@ -355,4 +360,18 @@ function relativeAge(currentIso: string, priorIso: string): string {
 
 function escapeTableCell(s: string): string {
   return s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+// FB hashtag search URL (distinct from IG's instagram.com/explore/tags/...).
+function fbHashtagSearchUrl(tag: string): string {
+  const stripped = tag.startsWith("#") ? tag.slice(1) : tag;
+  return `https://www.facebook.com/hashtag/${encodeURIComponent(stripped)}`;
+}
+
+function renderHashtagsCell(caption: string | null): string {
+  const tags = extractHashtags(caption);
+  if (tags.length === 0) return "—";
+  return tags
+    .map((t) => `[${escapeTableCell(t)}](${fbHashtagSearchUrl(t)})`)
+    .join(" ");
 }

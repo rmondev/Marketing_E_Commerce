@@ -342,7 +342,12 @@ function renderCatalog(
   entries: ManifestEntry[],
 ): string {
   const generatedAtIso = new Date().toISOString();
-  const platformDisplay = platform.charAt(0).toUpperCase() + platform.slice(1);
+  // Derive a human display name from the snake_case registry key.
+  // "instagram" → "Instagram", "facebook_page" → "Facebook Page".
+  const platformDisplay = platform
+    .split("_")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
 
   // Quick Access categories (rolling windows relative to "now").
   const nowMs = Date.now();
@@ -452,7 +457,7 @@ function renderCatalog(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Instagram Analytics Audit Reports — ${escapeHtml(client.display_name)} (Archive)</title>
+<title>${escapeHtml(platformDisplay)} Analytics Audit Reports — ${escapeHtml(client.display_name)} (Archive)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">

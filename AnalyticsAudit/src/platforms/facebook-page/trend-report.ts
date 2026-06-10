@@ -1,24 +1,32 @@
-// Facebook Page HTML trend report (thin v1).
+// Facebook Page HTML trend report (thin v1). Visual language matches the
+// Instagram trend report (Inter font, two-tier eyebrow + title header,
+// header-info card, KPI cards with Chart.js sparklines, sortable posts
+// table, dark-mode-aware palette) so an operator comparing platforms sees
+// a consistent dashboard.
 //
-// What this renders:
-//   - Header with Page name + Generated timestamp + the App Review banner
-//   - 3 KPI cards (Followers, Fans, Posts Captured This Snapshot) with inline
-//     SVG sparklines across the most recent WINDOW_SIZE snapshots
-//   - Posts table — content inventory for the latest snapshot
+// What this renders today:
+//   - Two-tier report header (eyebrow date + Page display name)
+//   - Header-info card (Generated / Latest Snapshot / Comparing To)
+//   - App Review banner (styled as a glossary-style call-out)
+//   - Account section: 3 KPI cards (Followers, Fans, Posts Captured) with
+//     Chart.js sparklines, deltas, descriptions
+//   - Posts section: sortable content-inventory table with collapsible
+//     message previews
 //
 // What this does NOT render (gated by Meta App Review — see APP_REVIEW.md):
-//   - Audience donuts (FB Page demographics are also deprecated by Meta)
-//   - Engagement KPI cards (reach, post engagements, CTA clicks, reactions)
-//   - Per-post engagement columns (reactions, comments, shares, reach)
-//   - Likes-per-post-across-window chart
+//   - Engagement KPI cards (reach, page views, CTA clicks, follows, etc.)
+//   - Audience donuts (FB Page demographics are also permanently deprecated)
+//   - Reactions/comments/shares/per-post-reach columns in the Posts table
+//   - Likes-per-post-across-window evolution chart
 //
-// When App Review approves the app, the audit captures engagement data; flip
-// the flags inside renderHtml to render the additional sections.
+// When App Review approves the app, the audit captures engagement data and
+// the additional sections can be wired in alongside the existing KPI grid.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { db } from "../../core/db/client.js";
 import {
+  toEtTimestamp,
   toFilenameSafeTimestampEt,
   toLongDateEt,
   toReadableEtTimestamp,
@@ -29,7 +37,12 @@ import {
   migrateLegacyOrphans,
   upsertManifestEntry,
 } from "../../core/reports/catalog.js";
-import { CAPTION_PREVIEW_CHARS, truncateCaption } from "../../core/reports/_shared.js";
+import {
+  CAPTION_PREVIEW_CHARS,
+  HASHTAGS_PER_ROW,
+  extractHashtags,
+  truncateCaption,
+} from "../../core/reports/_shared.js";
 import type { ClientRef } from "../instagram/markdown-report.js";
 import type { GenerateTrendResult } from "../instagram/trend-report.js";
 
@@ -72,6 +85,39 @@ type FacebookPageExtras = {
   page_name?: string;
   engagement_pending_app_review?: boolean;
 };
+
+// Visible KPI cards in the Account section. Keeping the structure parallel
+// to IG's ACCOUNT_METRICS so the rendering code can share a template.
+type KpiKey = "followers_count" | "fan_count" | "posts_captured";
+type KpiDef = {
+  key: KpiKey;
+  label: string;
+  sparkId: string;
+  description: string;
+};
+const KPI_DEFS: readonly KpiDef[] = [
+  {
+    key: "followers_count",
+    label: "Followers",
+    sparkId: "spark-followers",
+    description:
+      "People who follow this Page. The modern, engagement-relevant audience number.",
+  },
+  {
+    key: "fan_count",
+    label: "Fans (legacy Page Likes)",
+    sparkId: "spark-fans",
+    description:
+      "The legacy 'Page Likes' count. Often matches followers but tracks separately. Kept for continuity with older Meta tooling.",
+  },
+  {
+    key: "posts_captured",
+    label: "Posts Captured",
+    sparkId: "spark-posts",
+    description:
+      "Number of posts pulled into this snapshot. Up to 50 most recent are scanned; supplemental rows fill when fewer than 5 are in the lookback window.",
+  },
+];
 
 function parseAccount(row: AccountDbRow): AccountSummary {
   const extras = (
@@ -179,257 +225,436 @@ type RenderInput = {
 
 function renderHtml(input: RenderInput): string {
   const { client, snapshots, latest, prior, accountById, latestPosts } = input;
+
+  const chronological = [...snapshots].reverse();
+  // Multi-line chart x-axis labels: Chart.js renders each array element on
+  // its own line. Top line is the snapshot identifier, bottom line is the
+  // capture date in long form.
+  const chronoLabels: string[][] = chronological.map((s) => [
+    `Snapshot #${s.id}`,
+    `- ${toLongDateEt(s.captured_at)} -`,
+  ]);
+
+  const kpiCards = KPI_DEFS.map((m) => renderKpiCard(m, input)).join("");
+
+  const sparkSeries = Object.fromEntries(
+    KPI_DEFS.map((m) => [
+      m.sparkId,
+      chronological.map((s) => accountById.get(s.id)?.[m.key] ?? 0),
+    ]),
+  );
+
+  const generatedAtIso = new Date().toISOString();
+  const generatedReadable = toReadableEtTimestamp(generatedAtIso);
+  const generatedCompact = toEtTimestamp(generatedAtIso);
+  const eyebrowDate = toLongDateEt(latest.captured_at);
   const latestAcct = accountById.get(latest.id);
-  const priorAcct = prior ? accountById.get(prior.id) : undefined;
-  // Series for sparklines: oldest → newest (reverse the desc-ordered list).
-  const seriesAsc = [...snapshots].reverse();
+  const headerSubtitle =
+    latestAcct?.page_name && latestAcct.page_name !== client.display_name
+      ? latestAcct.page_name
+      : null;
 
-  const followersSeries = seriesAsc.map(
-    (s) => accountById.get(s.id)?.followers_count ?? 0,
-  );
-  const fansSeries = seriesAsc.map(
-    (s) => accountById.get(s.id)?.fan_count ?? 0,
-  );
-  const postsSeries = seriesAsc.map(
-    (s) => accountById.get(s.id)?.posts_captured ?? 0,
-  );
-
-  return `<!DOCTYPE html>
+  return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Facebook Page Audit — ${escapeHtml(client.display_name)}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Facebook Page Audit — ${escapeHtml(client.display_name)} (Trend)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #fafafa;
-    --card: #ffffff;
-    --border: #e5e7eb;
-    --text: #111827;
-    --text-muted: #6b7280;
-    --accent: #1877f2;
+    color-scheme: light dark;
+    --border: #d8dadf;
+    --muted: #6b7280;
+    --pos: #1f8a55;
+    --neg: #c4452a;
+    --zero: #6b7280;
+    --card-bg: rgba(127,127,127,0.04);
+    --accent: #4e79a7;
     --warn-bg: #fff7ed;
     --warn-border: #fdba74;
     --warn-text: #9a3412;
   }
-  * { box-sizing: border-box; }
-  body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    margin: 0; padding: 32px 24px; background: var(--bg); color: var(--text);
-    max-width: 1100px; margin-left: auto; margin-right: auto;
-    -webkit-font-smoothing: antialiased;
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --border: #3a3d44; --muted: #9ba1ab; --card-bg: rgba(255,255,255,0.04);
+      --accent: #82a8d3;
+      --warn-bg: rgba(154,52,18,0.16); --warn-border: #b45309; --warn-text: #fdba74;
+    }
   }
-  .eyebrow {
-    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
-    color: var(--text-muted); font-weight: 600;
-  }
-  h1 { margin: 4px 0 8px; font-size: 28px; font-weight: 700; }
-  .meta { color: var(--text-muted); font-size: 14px; margin-bottom: 24px; }
-  .banner {
-    background: var(--warn-bg); border-left: 4px solid var(--warn-border);
-    color: var(--warn-text); padding: 16px 20px; border-radius: 8px;
-    font-size: 14px; line-height: 1.55; margin-bottom: 28px;
-  }
-  .banner strong { color: var(--warn-text); }
-  .banner a { color: var(--warn-text); }
-  .kpi-grid {
-    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
-    margin-bottom: 32px;
-  }
-  .kpi {
-    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-    padding: 20px;
-  }
-  .kpi-label {
-    font-size: 12px; color: var(--text-muted); font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.06em;
-  }
-  .kpi-value {
-    font-size: 32px; font-weight: 700; margin: 8px 0 4px;
-    font-variant-numeric: tabular-nums;
-  }
-  .kpi-delta {
-    font-size: 13px; color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .kpi-delta.up { color: #15803d; }
-  .kpi-delta.down { color: #b91c1c; }
-  .kpi-spark { margin-top: 12px; height: 36px; }
-  .kpi-desc {
-    margin-top: 10px; font-size: 12px; color: var(--text-muted);
-    line-height: 1.45;
-  }
-  section { margin-bottom: 36px; }
-  h2 {
-    font-size: 18px; font-weight: 600; margin: 0 0 14px;
-    padding-bottom: 8px; border-bottom: 1px solid var(--border);
-  }
-  table {
-    width: 100%; border-collapse: collapse; background: var(--card);
-    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
-    font-size: 14px;
-  }
-  th, td { padding: 12px 14px; text-align: left; }
-  thead th {
-    background: #f9fafb; font-weight: 600; color: var(--text-muted);
-    border-bottom: 1px solid var(--border); font-size: 12px;
-    text-transform: uppercase; letter-spacing: 0.05em;
-  }
-  tbody tr + tr { border-top: 1px solid var(--border); }
-  td.sup { color: var(--text-muted); text-align: center; width: 24px; }
-  td.type {
-    font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-    font-size: 12px; color: var(--text-muted);
-  }
-  td a { color: var(--accent); text-decoration: none; }
-  td a:hover { text-decoration: underline; }
-  .pending-note {
-    font-size: 12px; color: var(--text-muted); margin-top: 12px;
-    font-style: italic;
-  }
-  footer {
-    margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border);
-    font-size: 12px; color: var(--text-muted); text-align: center;
-  }
+  body { font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 1180px; margin: 2rem auto; padding: 0 1.25rem; line-height: 1.55;
+         font-feature-settings: "cv11", "ss01"; }
+  /* Two-tier report header — eyebrow + title, accent-colored, matches IG. */
+  .report-header { margin: 0 0 1.5rem; padding-bottom: 1.1rem;
+                   border-bottom: 1px solid var(--border); }
+  .report-eyebrow { margin: 0 0 0.6rem; font-size: 0.98rem; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.14em;
+                    color: var(--accent); }
+  .report-title { margin: 0; font-size: 2.7rem; font-weight: 700;
+                  letter-spacing: -0.02em; line-height: 1.05;
+                  color: var(--accent); }
+  .report-subtitle { margin: 0.3rem 0 0; font-size: 1rem; font-weight: 500;
+                     color: var(--muted); }
+  h2 { margin: 2.5rem 0 0.75rem; font-size: 1.35rem; }
+  h3 { margin: 1.75rem 0 0.75rem; font-size: 1.05rem; color: var(--muted);
+       text-transform: uppercase; letter-spacing: 0.04em; }
+  p { margin: 0.5rem 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .header-info { border: 1px solid var(--border); background: var(--card-bg);
+                 border-radius: 8px; padding: 0.85rem 1rem; margin: 0.5rem 0 1.5rem;
+                 font-size: 0.95rem; }
+  .header-info > div { margin: 0.2rem 0; }
+  .header-info strong { color: var(--muted); font-weight: 600; }
+
+  /* App Review banner — same visual weight as the IG glossary card but
+     warning-colored so its blocking nature is obvious. */
+  .app-review-banner { border: 1px solid var(--warn-border); background: var(--warn-bg);
+                       color: var(--warn-text); border-left: 4px solid var(--warn-border);
+                       border-radius: 8px; padding: 0.85rem 1rem 0.95rem;
+                       margin: 1rem 0 2rem; font-size: 0.92rem; line-height: 1.55; }
+  .app-review-banner strong { color: var(--warn-text); }
+  .app-review-banner code { background: rgba(127,127,127,0.18); padding: 0.05rem 0.3rem;
+                            border-radius: 3px; font-size: 0.9em; }
+
+  .section-intro { color: var(--muted); margin: 0.25rem 0 1rem; font-size: 0.95rem; }
+  .section-intro strong { color: inherit; }
+
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+              gap: 0.75rem; }
+  .kpi-card { border: 1px solid var(--border); background: var(--card-bg);
+              padding: 0.85rem 1rem; border-radius: 8px; display: flex;
+              flex-direction: column; gap: 0.45rem; }
+  .kpi-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase;
+               letter-spacing: 0.05em; }
+  .kpi-current { font-size: 1.75rem; font-weight: 600; font-variant-numeric: tabular-nums;
+                 line-height: 1.1; }
+  .kpi-delta-row { font-size: 0.85rem; font-variant-numeric: tabular-nums;
+                   display: flex; align-items: baseline; gap: 0.4rem; }
+  .kpi-delta-label { color: var(--muted); font-size: 0.8rem; }
+  .kpi-delta.pos { color: var(--pos); font-weight: 600; }
+  .kpi-delta.neg { color: var(--neg); font-weight: 600; }
+  .kpi-delta.zero { color: var(--zero); }
+  .kpi-spark { height: 36px; position: relative; }
+  .kpi-spark-empty { height: 36px; color: var(--muted); font-size: 0.75rem;
+                     display: flex; align-items: center; font-style: italic; }
+  .kpi-desc { font-size: 0.78rem; color: var(--muted); line-height: 1.4; margin-top: 0.15rem; }
+
+  .pending-section { border: 1px dashed var(--border); background: var(--card-bg);
+                     border-radius: 8px; padding: 1rem 1.25rem; margin: 1rem 0 0;
+                     color: var(--muted); font-size: 0.92rem; line-height: 1.55;
+                     font-style: italic; }
+  .pending-section strong { color: var(--muted); }
+
+  .posts-summary { color: var(--muted); margin-bottom: 0.75rem; font-size: 0.9rem; }
+  .posts-table-wrap { overflow-x: auto; margin: 0.5rem 0; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums;
+          font-size: 0.9rem; min-width: 720px; }
+  thead th { font-size: 0.78rem; color: var(--muted); text-transform: uppercase;
+             letter-spacing: 0.04em; font-weight: 600; }
+  thead th[data-sort-key] { cursor: pointer; user-select: none; }
+  thead th[data-sort-key]:hover { color: var(--accent); }
+  thead th[data-sort-key]::after { content: "⇅"; display: inline-block;
+                                    margin-left: 0.3em; opacity: 0.35; font-size: 0.85em; }
+  thead th[data-sort-key].sort-asc::after  { content: "↑"; opacity: 1; color: var(--accent); }
+  thead th[data-sort-key].sort-desc::after { content: "↓"; opacity: 1; color: var(--accent); }
+  th, td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border);
+           text-align: left; vertical-align: top; }
+  .supp-marker { color: var(--muted); font-weight: 600; width: 1.5em; text-align: center; }
+
+  .message-cell, .hashtag-cell { max-width: 280px; }
+  .message-cell summary, .hashtag-cell summary { cursor: pointer; list-style: revert;
+                                                  font-size: 0.9rem; }
+  .message-cell .message-full { margin-top: 0.4rem; padding: 0.4rem 0.6rem;
+                                 background: var(--card-bg); border-radius: 4px;
+                                 white-space: pre-wrap; font-size: 0.88rem; }
+  .message-empty { color: var(--muted); font-style: italic; font-size: 0.85rem; }
+  .hashtag-cell .hashtag-summary-inner { display: flex; flex-wrap: wrap;
+                                          gap: 0.25rem 0.4rem; }
+  .hashtag-cell .hashtag-more-list { margin-top: 0.4rem; padding: 0.4rem 0.6rem;
+                                     background: var(--card-bg); border-radius: 4px;
+                                     display: flex; flex-wrap: wrap; gap: 0.25rem 0.4rem; }
+  .hashtag-cell a { font-size: 0.85rem; }
+  .hashtag-more-badge { font-size: 0.8rem; color: var(--muted);
+                        background: rgba(127,127,127,0.12); padding: 0.05rem 0.4rem;
+                        border-radius: 10px; }
+  .hashtag-empty { color: var(--muted); }
+
+  footer { margin-top: 3rem; color: var(--muted); font-size: 0.85rem;
+           border-top: 1px solid var(--border); padding-top: 1rem; }
 </style>
 </head>
 <body>
-  <div class="eyebrow">Facebook Page Audit</div>
-  <h1>${escapeHtml(client.display_name)}${
-    latestAcct?.page_name && latestAcct.page_name !== client.display_name
-      ? ` <span style="color:var(--text-muted);font-weight:500">· ${escapeHtml(latestAcct.page_name)}</span>`
-      : ""
-  }</h1>
-  <div class="meta">
-    Generated ${toReadableEtTimestamp(new Date().toISOString())} · Latest snapshot #${latest.id} captured ${toLongDateEt(latest.captured_at)}
+  <header class="report-header">
+    <p class="report-eyebrow">Facebook Page Audit Report · ${escapeHtml(eyebrowDate)}</p>
+    <h1 class="report-title">${escapeHtml(client.display_name)}</h1>
+    ${headerSubtitle ? `<p class="report-subtitle">${escapeHtml(headerSubtitle)}</p>` : ""}
+  </header>
+
+  ${renderHeaderInfo(generatedReadable, latest, prior, snapshots.length)}
+
+  ${renderAppReviewBanner()}
+
+  <h2>Account</h2>
+  <p class="section-intro">Snapshot of the Page at this point in time. <strong>Followers</strong> is the modern engagement-relevant count; <strong>Fans</strong> is the legacy "Page Likes" number, kept for continuity. <strong>Posts Captured</strong> reflects how many posts the audit pulled into this snapshot (not the lifetime total).</p>
+  <div class="kpi-grid">${kpiCards}</div>
+
+  <h2>Audience</h2>
+  <div class="pending-section">
+    <strong>Audience demographics unavailable.</strong> Page-level demographic metrics (fan country / city / age / gender) were removed by Meta in Graph v22+. Unlike the engagement metrics below, these will <em>not</em> return after App Review — the data is only viewable in Meta Business Suite. See <code>docs/APP_REVIEW.md</code>.
   </div>
 
-  <div class="banner">
-    <strong>⚠ Engagement data pending Meta App Review.</strong> This thin v1 report
-    shows Page identity (followers, fans) and a content inventory of recent posts.
-    Reactions, comments, shares, per-post reach, page-level insights (impressions,
-    CTA clicks, engagement actions), and audience demographics require Meta to
-    approve our app for <code>pages_read_engagement</code>. See <code>docs/APP_REVIEW.md</code>
-    for the unblock path. Page demographics were removed by Meta in Graph v22+ and
-    won't return even after review.
+  <h2>Posts</h2>
+  ${renderPostsSection(latestPosts)}
+  <div class="pending-section" style="margin-top: 1rem;">
+    <strong>Engagement columns pending Meta App Review.</strong> Reactions, comments, shares, per-post reach, and ER will appear here once our app is approved for <code>pages_read_engagement</code>.
   </div>
 
-  <section>
-    <h2>Account</h2>
-    <div class="kpi-grid">
-      ${renderKpi("Followers", latestAcct?.followers_count ?? 0, priorAcct?.followers_count, followersSeries, "People who follow this Page (the modern engagement-relevant count).")}
-      ${renderKpi("Fans (legacy Page Likes)", latestAcct?.fan_count ?? 0, priorAcct?.fan_count, fansSeries, "The legacy \"Page Likes\" count. Often matches followers but tracks separately.")}
-      ${renderKpi("Posts Captured", latestAcct?.posts_captured ?? 0, priorAcct?.posts_captured, postsSeries, "Number of posts pulled into this snapshot. Up to 50 most recent, fills supplementally when fewer than 5 in the lookback window.")}
-    </div>
-  </section>
+  <footer>Generated by AnalyticsAudit v0.1.0 · ${escapeHtml(generatedCompact)}</footer>
 
-  <section>
-    <h2>Posts</h2>
-    ${renderPostsTable(latestPosts)}
-    <div class="pending-note">
-      Engagement columns (Reactions, Comments, Shares, Reach, ER) will appear here once Meta App Review approves <code>pages_read_engagement</code>.
-    </div>
-  </section>
+<script>
+const sparkSeries = ${JSON.stringify(sparkSeries)};
+const sparkLabels = ${JSON.stringify(chronoLabels)};
 
-  <footer>
-    AnalyticsAudit v0.1.0 · Snapshot #${latest.id} · ${toReadableEtTimestamp(latest.captured_at)}
-  </footer>
+const sparkOpts = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { display: false }, tooltip: { enabled: false } },
+  scales: { x: { display: false }, y: { display: false } },
+  animation: false,
+  elements: { point: { radius: 0 }, line: { borderWidth: 1.5, tension: 0.25 } },
+};
+
+for (const [id, data] of Object.entries(sparkSeries)) {
+  const canvas = document.getElementById(id);
+  if (!canvas || data.length < 2) continue;
+  new Chart(canvas, {
+    type: "line",
+    data: { labels: sparkLabels, datasets: [{ data, borderColor: "#4e79a7", fill: false }] },
+    options: sparkOpts,
+  });
+}
+
+// Click-to-sort on the Posts table. Same pattern as the IG report.
+(function setupPostsSort() {
+  const table = document.querySelector(".posts-table");
+  if (!table) return;
+  const tbody = table.querySelector("tbody");
+  const headers = Array.from(table.querySelectorAll("thead th"));
+  let currentTh = null;
+  let currentDir = "asc";
+
+  headers.forEach((th, colIdx) => {
+    if (!th.dataset.sortKey) return;
+    th.addEventListener("click", () => {
+      const type = th.dataset.sortType || "text";
+      const dir = th === currentTh && currentDir === "asc" ? "desc" : "asc";
+      headers.forEach((h) => h.classList.remove("sort-asc", "sort-desc"));
+      th.classList.add(dir === "asc" ? "sort-asc" : "sort-desc");
+      currentTh = th;
+      currentDir = dir;
+
+      const rows = Array.from(tbody.querySelectorAll("tr"));
+      rows.sort((a, b) => {
+        const av = a.children[colIdx].dataset.sortValue ?? "";
+        const bv = b.children[colIdx].dataset.sortValue ?? "";
+        if (av === "" && bv === "") return 0;
+        if (av === "") return 1;
+        if (bv === "") return -1;
+        let cmp;
+        if (type === "number") {
+          cmp = parseFloat(av) - parseFloat(bv);
+        } else if (type === "date") {
+          cmp = new Date(av).getTime() - new Date(bv).getTime();
+        } else {
+          cmp = av.localeCompare(bv);
+        }
+        return dir === "asc" ? cmp : -cmp;
+      });
+      rows.forEach((r) => tbody.appendChild(r));
+    });
+  });
+})();
+</script>
 </body>
-</html>`;
+</html>
+`;
 }
 
-function renderKpi(
-  label: string,
-  current: number,
-  prior: number | undefined,
-  series: number[],
-  description: string,
+function renderHeaderInfo(
+  generatedReadable: string,
+  latest: Snapshot,
+  prior: Snapshot | undefined,
+  windowCount: number,
 ): string {
-  const delta = formatKpiDelta(current, prior);
-  return `
-    <div class="kpi">
-      <div class="kpi-label">${escapeHtml(label)}</div>
-      <div class="kpi-value">${current.toLocaleString("en-US")}</div>
-      <div class="kpi-delta ${delta.dirClass}">${escapeHtml(delta.text)}</div>
-      <div class="kpi-spark">${renderSparkline(series)}</div>
-      <div class="kpi-desc">${escapeHtml(description)}</div>
-    </div>
-  `.trim();
-}
-
-function formatKpiDelta(
-  current: number,
-  prior: number | undefined,
-): { text: string; dirClass: string } {
-  if (prior === undefined) return { text: "first snapshot", dirClass: "" };
-  const diff = current - prior;
-  if (diff === 0) return { text: "Change: 0", dirClass: "" };
-  const sign = diff > 0 ? "+" : "";
-  const pct = prior === 0 ? "—" : `${((diff / prior) * 100).toFixed(1)}%`;
-  const dirClass = diff > 0 ? "up" : "down";
-  const pctText = pct === "—" ? "—" : `${sign}${pct}`;
-  return { text: `Change: ${sign}${diff.toLocaleString("en-US")} (${pctText})`, dirClass };
-}
-
-// Inline SVG sparkline — no JS framework needed for 3 small charts.
-function renderSparkline(series: number[]): string {
-  if (series.length === 0) return "";
-  const W = 220;
-  const H = 36;
-  const PAD = 2;
-  const min = Math.min(...series);
-  const max = Math.max(...series);
-  const range = max - min || 1;
-  const step = (W - 2 * PAD) / Math.max(1, series.length - 1);
-  const points = series
-    .map((v, i) => {
-      const x = PAD + i * step;
-      const y = PAD + (H - 2 * PAD) * (1 - (v - min) / range);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  const lastX = PAD + (series.length - 1) * step;
-  const lastY =
-    PAD + (H - 2 * PAD) * (1 - (series[series.length - 1]! - min) / range);
-  return `
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:${H}px;display:block">
-      <polyline fill="none" stroke="#1877f2" stroke-width="2" points="${points}" />
-      <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="2.5" fill="#1877f2" />
-    </svg>
-  `.trim();
-}
-
-function renderPostsTable(posts: PostDbRow[]): string {
-  if (posts.length === 0) {
-    return `<p style="color:var(--text-muted)">No posts captured in this snapshot.</p>`;
+  const lines: string[] = [];
+  lines.push(
+    `<div><strong>Generated On:</strong> ${escapeHtml(generatedReadable)}</div>`,
+  );
+  lines.push(
+    `<div><strong>Latest Snapshot:</strong> #${latest.id} — Captured on ${escapeHtml(toReadableEtTimestamp(latest.captured_at))}</div>`,
+  );
+  if (prior) {
+    lines.push(
+      `<div><strong>Comparing To Snapshot:</strong> #${prior.id} — Captured on ${escapeHtml(toReadableEtTimestamp(prior.captured_at))}</div>`,
+    );
+  } else {
+    lines.push(
+      `<div><strong>Comparing To Snapshot:</strong> <em>None — first snapshot for this client.</em></div>`,
+    );
   }
-  const rows = posts
-    .map((p) => {
-      const sup = p.is_supplemental === 1 ? "†" : "";
-      const message = truncateCaption(p.caption, MESSAGE_PREVIEW_CHARS);
-      const link = p.permalink
-        ? `<a href="${escapeHtml(p.permalink)}" target="_blank" rel="noopener">view</a>`
-        : "—";
-      return `<tr>
-        <td class="sup">${sup}</td>
-        <td class="type">${escapeHtml(p.media_type)}</td>
-        <td>${escapeHtml(toShortReadableEt(p.published_at))}</td>
-        <td>${escapeHtml(message)}</td>
-        <td>${link}</td>
-      </tr>`;
-    })
-    .join("");
+  if (windowCount < WINDOW_SIZE) {
+    lines.push(
+      `<div><strong>Window:</strong> ${windowCount}/${WINDOW_SIZE} snapshots available — trend visuals will be richer once more snapshots accumulate.</div>`,
+    );
+  }
+  return `<div class="header-info">${lines.join("\n  ")}</div>`;
+}
+
+function renderAppReviewBanner(): string {
+  return `<div class="app-review-banner">
+  <strong>⚠ Engagement data pending Meta App Review.</strong> This thin v1
+  report shows Page identity (followers, fans) and a content inventory of
+  recent posts. Reactions, comments, shares, per-post reach, page-level
+  insights (impressions, CTA clicks, engagement actions), and audience
+  demographics require Meta to approve our app for
+  <code>pages_read_engagement</code>. See <code>docs/APP_REVIEW.md</code>
+  for the unblock path.
+</div>`;
+}
+
+function renderKpiCard(metric: KpiDef, input: RenderInput): string {
+  const { latest, prior, accountById, snapshots } = input;
+  const currentVal = accountById.get(latest.id)?.[metric.key];
+  const priorVal = prior ? accountById.get(prior.id)?.[metric.key] : undefined;
+
+  const currentDisplay =
+    currentVal === undefined ? "—" : currentVal.toLocaleString("en-US");
+  const delta = renderDelta(currentVal, priorVal);
+
+  const sparkHtml =
+    snapshots.length >= 2
+      ? `<div class="kpi-spark"><canvas id="${metric.sparkId}"></canvas></div>`
+      : `<div class="kpi-spark-empty">trend needs ≥2 snapshots</div>`;
+
   return `
-    <table>
+  <div class="kpi-card">
+    <div class="kpi-label">${escapeHtml(metric.label)}</div>
+    <div class="kpi-current">${escapeHtml(currentDisplay)}</div>
+    <div class="kpi-delta-row">
+      <span class="kpi-delta-label">Change:</span>
+      <span class="kpi-delta ${delta.cls}">${escapeHtml(delta.text)}</span>
+    </div>
+    ${sparkHtml}
+    <div class="kpi-desc">${escapeHtml(metric.description)}</div>
+  </div>`;
+}
+
+function renderDelta(
+  current: number | undefined,
+  prior: number | undefined,
+): { text: string; cls: string } {
+  if (current === undefined || prior === undefined) {
+    return { text: "—", cls: "zero" };
+  }
+  const d = current - prior;
+  if (d === 0) return { text: "0 (—)", cls: "zero" };
+  const sign = d > 0 ? "+" : "";
+  const cls = d > 0 ? "pos" : "neg";
+  if (prior === 0) return { text: `${sign}${d.toLocaleString("en-US")} (—)`, cls };
+  const pct = (d / prior) * 100;
+  const pctSign = pct >= 0 ? "+" : "";
+  return {
+    text: `${sign}${d.toLocaleString("en-US")} (${pctSign}${pct.toFixed(1)}%)`,
+    cls,
+  };
+}
+
+function renderPostsSection(posts: PostDbRow[]): string {
+  if (posts.length === 0) {
+    return `<p class="posts-summary">No posts captured in this snapshot.</p>`;
+  }
+  const supplementalCount = posts.filter((p) => p.is_supplemental === 1).length;
+  const inWindowCount = posts.length - supplementalCount;
+  const summary = `${posts.length} post(s) captured — ${inWindowCount} in-window, ${supplementalCount} supplemental (marked <span class="supp-marker">†</span>).`;
+  const rows = posts.map(renderPostRow).join("");
+  return `
+  <p class="posts-summary">${summary}</p>
+  <div class="posts-table-wrap">
+    <table class="posts-table">
       <thead>
-        <tr><th></th><th>Type</th><th>Posted</th><th>Message</th><th>Link</th></tr>
+        <tr>
+          <th></th>
+          <th data-sort-key="type" data-sort-type="text">Type</th>
+          <th data-sort-key="posted" data-sort-type="date">Posted</th>
+          <th>Message</th>
+          <th data-sort-key="hashtags" data-sort-type="number">Hashtags</th>
+          <th>Link</th>
+        </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
-  `.trim();
+  </div>`;
+}
+
+function renderPostRow(p: PostDbRow): string {
+  const supMark = p.is_supplemental === 1 ? "†" : "";
+  const messageCell = renderMessageCell(p.caption);
+  const hashtagCount = extractHashtags(p.caption).length;
+  const link = p.permalink
+    ? `<a href="${escapeHtml(p.permalink)}" target="_blank" rel="noopener">view</a>`
+    : `<span class="message-empty">—</span>`;
+  return `<tr>
+    <td class="supp-marker">${supMark}</td>
+    <td data-sort-value="${escapeHtml(p.media_type)}">${escapeHtml(p.media_type)}</td>
+    <td data-sort-value="${escapeHtml(p.published_at)}">${escapeHtml(toShortReadableEt(p.published_at))}</td>
+    <td class="message-cell">${messageCell}</td>
+    <td data-sort-value="${hashtagCount}">${renderHashtagsCell(p.caption)}</td>
+    <td>${link}</td>
+  </tr>`;
+}
+
+// Hashtag URL pattern for Facebook. Distinct from IG's
+// instagram.com/explore/tags/<tag>/; FB uses facebook.com/hashtag/<tag>.
+function fbHashtagSearchUrl(tag: string): string {
+  const stripped = tag.startsWith("#") ? tag.slice(1) : tag;
+  return `https://www.facebook.com/hashtag/${encodeURIComponent(stripped)}`;
+}
+
+function renderHashtagsCell(caption: string | null): string {
+  const tags = extractHashtags(caption);
+  if (tags.length === 0) return `<span class="hashtag-empty">—</span>`;
+  const linkHtml = (t: string): string =>
+    `<a href="${escapeHtml(fbHashtagSearchUrl(t))}" target="_blank" rel="noopener">${escapeHtml(t)}</a>`;
+  const shown = tags.slice(0, HASHTAGS_PER_ROW);
+  const extra = tags.slice(HASHTAGS_PER_ROW);
+  if (extra.length === 0) {
+    return `<div class="hashtag-summary-inner">${shown.map(linkHtml).join(" ")}</div>`;
+  }
+  return `<details class="hashtag-cell">
+        <summary>
+          <span class="hashtag-summary-inner">${shown.map(linkHtml).join(" ")} <span class="hashtag-more-badge">+${extra.length} more</span></span>
+        </summary>
+        <div class="hashtag-more-list">${extra.map(linkHtml).join(" ")}</div>
+      </details>`;
+}
+
+function renderMessageCell(caption: string | null): string {
+  if (!caption || caption.trim() === "") {
+    return `<span class="message-empty">(no message)</span>`;
+  }
+  const preview = truncateCaption(caption, MESSAGE_PREVIEW_CHARS);
+  const isTruncated = caption.length > MESSAGE_PREVIEW_CHARS;
+  if (!isTruncated) {
+    return escapeHtml(preview);
+  }
+  return `<details>
+    <summary>${escapeHtml(preview)}</summary>
+    <div class="message-full">${escapeHtml(caption)}</div>
+  </details>`;
 }
 
 function escapeHtml(s: string): string {
