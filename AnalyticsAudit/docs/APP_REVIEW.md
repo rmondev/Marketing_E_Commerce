@@ -42,7 +42,7 @@ Page-level demographic metrics — all gone:
 
 These will **not** come back after App Review. The data is only viewable in Meta Business Suite UI now. There's no v25 API path for FB Page demographics.
 
-#### View-based replacements — also dead (2026-06-09 diagnostic)
+#### View-based replacements — also dead (exhaustive probe 2026-06-09)
 
 Some recent documentation cites view-based demographic metrics as the v22+ replacement path for the deprecated `page_fans_*` series:
 
@@ -52,9 +52,16 @@ Some recent documentation cites view-based demographic metrics as the v22+ repla
 - `page_views_by_referers_unique`
 - `page_impressions_by_age_gender_unique` / `_country_unique` / `_city_unique`
 
-We tested all 7 candidates **on both `v25.0` and `v22.0` endpoint paths**, on both 7-day and 89-day windows. Every call returns code 100 "The value must be a valid insights metric". The v22.0 endpoint itself responds normally (`page_impressions_unique` returns HTTP 200 with empty data, same as v25.0), confirming the v22 path is alive — the metric names are genuinely gone, not version-gated. These names may have been accurate at one point in 2024-2025 but have been removed by 2026-06.
+This is **wrong as of Graph v25**. We ran an exhaustive 37-call probe (see [debug-raw.ts](../src/platforms/facebook-page/debug-raw.ts)) covering:
 
-Conclusion: **FB Page demographics are unrecoverable from the Graph API.** Bilingual or downgrading the API version won't help. Submit App Review for the engagement scopes; do not waste time chasing demographic metric replacements.
+- All 7 names from the cited source, plus 19 plausible spelling variants (singular "view", without "by", `_age_gender_unique` vs `_age_gender`, `audience_`, `demographics_`, `reach_by_`, IG-style `audience_demographics_`, etc.) — **26 variants total, all return code 100 "invalid insights metric"**.
+- 7 parameter combinations on the canonical name (`period=days_28`, `period=week`, `period=lifetime`, `metric_type=total_value`, `metric_type=time_series`, with/without `since`/`until`) — **all return code 100**.
+- The source's exact batched URL pattern (3 metrics in one call, `period=day`, 7-day window) on **both `v22.0` AND `v25.0` paths** — **both return code 100**.
+- Sanity calls (`page_impressions_unique` on v22.0 and v25.0) — both return HTTP 200 with `data: []`, confirming the endpoint and token are working correctly. The endpoint isn't the problem; the metric names are.
+
+35 out of 37 tests returned code 100 (the only 2 successes were the sanity checks). This is the unambiguous Meta error for "this metric name does not exist in our registry" — distinct from code 10 (permission denied) and from HTTP 200 with empty data (silent suppression for unscoped access).
+
+Conclusion: **FB Page demographics are unrecoverable from the Graph API.** Downgrading the API version, switching parameter combinations, or trying alternate spellings will not help — Meta uses unversioned, global deprecation. Sources claiming otherwise are either stale (the metric names were valid at some point in 2024-2025 and got removed silently) or AI-generated guesses from outdated training data. Do not chase demographic metric replacements. The data is only viewable in Meta Business Suite UI; App Review will not unlock it either.
 
 ### Bonus rules discovered
 
