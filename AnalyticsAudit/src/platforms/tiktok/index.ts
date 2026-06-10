@@ -1,31 +1,36 @@
-// TikTok registry entry — scaffolding only. All functions throw
-// `notImplemented` until the platform is built out. The CLI checks
-// `isImplemented` before calling and prints a friendly skip message.
+// TikTok registry entry.
 //
-// Implementation plan (future session): TikTok uses a separate API
-// (open.tiktokapis.com) and a separate OAuth flow (PKCE + refresh
-// tokens). Expect a new api.ts, new types.ts (with TikTok-specific zod
-// schemas), and a different token-refresh dance. Some helpers from
-// src/core/reports/ may be reusable.
+// Phase status:
+//   G1 — OAuth onboarding (+ manual-token workaround). Done.
+//   G2 — Display API wrapper (api.ts / types.ts). Done.
+//   G3 — audit + Markdown report (this file wires them). Done.
+//   Next — HTML trend report (generateTrendReport) flips `reports` to true.
+//
+// TikTok uses a separate API (open.tiktokapis.com) and OAuth flow (PKCE +
+// rotating refresh tokens). The audit auto-refreshes the access token inline
+// (see audit.ts → ensureFreshToken), so there's no manual token-refresh step
+// during normal use; the registry's tokenRefresh hook stays a stub until the
+// token:refresh CLI becomes registry-aware.
 
 import type { PlatformHandle } from "../_registry.js";
 import { notImplemented } from "../_registry.js";
+import { runTikTokAudit } from "./audit.js";
+import { generateTikTokReport } from "./markdown-report.js";
 import { onboardTikTok } from "./onboarding.js";
 
 export const tiktokPlatform: PlatformHandle = {
   name: "tiktok",
   displayName: "TikTok",
   capabilities: {
-    audit: false,
+    audit: true,
+    // HTML trend report not built yet — report:trend skips TikTok until this
+    // flips. The Markdown rolling report IS generated (inside the audit).
     reports: false,
-    // Onboarding is a placeholder (no real OAuth yet — just paste a
-    // pre-minted token). Enables attaching the row today so audits start
-    // working when implemented.
     onboarding: true,
     tokenRefresh: false,
   },
-  audit: () => notImplemented("TikTok", "audit"),
-  generateMarkdownReport: () => notImplemented("TikTok", "markdown report"),
+  audit: runTikTokAudit,
+  generateMarkdownReport: generateTikTokReport,
   generateTrendReport: () => notImplemented("TikTok", "trend report"),
   onboarding: onboardTikTok,
   tokenRefresh: () => notImplemented("TikTok", "token refresh"),
