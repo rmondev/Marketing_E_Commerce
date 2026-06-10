@@ -44,15 +44,21 @@ program
     "Mint a TikTok access/refresh token pair via the browser, trying multiple exchange request-shapes (workaround for the sandbox PKCE bug).",
   )
   .option(
-    "--method <plain|s256>",
-    "PKCE challenge method. 'plain' (default) sidesteps the broken S256 validator; 's256' is the spec default.",
-    "plain",
+    "--method <s256|plain>",
+    "PKCE challenge method. Default 's256' — TikTok's authorize endpoint REJECTS 'plain' (it returns a code_challenge_method error before issuing a code), so 'plain' is kept only for experimentation.",
+    "s256",
   )
   .option("--no-browser", "Don't auto-open the browser; just print the URL.");
 program.parse();
 
 const opts = program.opts() as { method: string; browser: boolean };
-const method: PkceMethod = opts.method === "s256" ? "S256" : "plain";
+const method: PkceMethod = opts.method === "plain" ? "plain" : "S256";
+if (method === "plain") {
+  console.warn(
+    "\n  ⚠ TikTok's authorize endpoint rejects code_challenge_method=plain and will\n" +
+      "    fail with a 'code_challenge_method' error before issuing a code. Use S256.",
+  );
+}
 
 if (
   env.TIKTOK_CLIENT_KEY === undefined ||
@@ -167,13 +173,14 @@ for (const v of variants) {
 
 if (!minted) {
   console.error("\n  All exchange variants failed.");
-  if (method === "plain") {
-    console.error("  Next: re-run with the other method →  npm run tiktok:mint -- --method s256");
-  } else {
-    console.error("  Next: re-run with the other method →  npm run tiktok:mint  (defaults to plain)");
-  }
   console.error(
-    "  If both methods fail, the code may have expired (they last only minutes) — re-run and authorize promptly.",
+    "  Most likely the code expired between authorize and exchange (they last only\n" +
+      "  minutes) — re-run `npm run tiktok:mint` and click Authorize promptly.",
+  );
+  console.error(
+    "  If a fast, fresh attempt still fails with the verifier/challenge error, that's\n" +
+      "  strong evidence the sandbox bug is genuinely server-side — attach the log_id(s)\n" +
+      "  above to the TikTok support ticket.",
   );
   process.exit(1);
 }
