@@ -201,9 +201,16 @@ src/
     │   ├── markdown-report.ts                Rolling Markdown report generator
     │   ├── trend-report.ts                   HTML trend report generator
     │   └── types.ts                          zod response schemas + MediaType + METRICS_BY_TYPE + AUDIENCE_TYPE_CONFIG
-    ├── facebook-page/                        Onboarding implemented; audit + reports pending
-    │   ├── index.ts                          PlatformHandle with capabilities.onboarding=true
-    │   └── onboarding.ts                     Page ID + Page Access Token prompts
+    ├── facebook-page/                        Thin v1: profile + post inventory; engagement data gated by Meta App Review
+    │   ├── api.ts                            Graph API wrapper, FacebookApiError
+    │   ├── audit.ts                          runFacebookPageAudit — captures profile + posts metadata
+    │   ├── index.ts                          PlatformHandle with capabilities.audit/reports/onboarding=true
+    │   ├── live-test.ts                      Live smoke test (dev-mode endpoints)
+    │   ├── markdown-report.ts                Rolling Markdown report with App Review banner
+    │   ├── onboarding.ts                     Page ID + Page Access Token prompts
+    │   ├── probe-metrics.ts                  Diagnostic: probes which metric names survive in current Graph version
+    │   ├── trend-report.ts                   HTML trend report (3 KPI cards + sparklines + posts table)
+    │   └── types.ts                          zod response schemas + post-type resolver
     └── tiktok/                               Onboarding placeholder; audit + reports pending
         ├── index.ts                          PlatformHandle with capabilities.onboarding=true
         └── onboarding.ts                     Handle + paste-token prompts (OAuth flow comes with audit)
@@ -223,7 +230,7 @@ The split is deliberate:
 ```ts
 export const PLATFORMS: Record<string, PlatformHandle> = {
   instagram: instagramPlatform,           // audit + reports + onboarding ready
-  facebook_page: facebookPagePlatform,    // onboarding ready; audit + reports pending
+  facebook_page: facebookPagePlatform,    // thin v1 audit + reports + onboarding (engagement gated by Meta App Review)
   tiktok: tiktokPlatform,                 // onboarding placeholder; audit + reports pending
 };
 ```
@@ -329,7 +336,7 @@ Before Phase C, reports were written to the top of `reports/` (e.g. `reports/sym
 
 Per-platform CLI behaviour:
 - Unknown platform → error with `client:list` hint.
-- Known platform but the relevant `capabilities.*` flag is false → friendly skip message; the loop continues. E.g. an audit run on a Facebook Page platform_account today prints "Facebook Page audit not yet implemented — skipping."
+- Known platform but the relevant `capabilities.*` flag is false → friendly skip message; the loop continues. E.g. an audit run on a TikTok platform_account today prints "TikTok audit not yet implemented — skipping." (Facebook Page ships a *thin v1* audit — see [docs/APP_REVIEW.md](APP_REVIEW.md) for what's gated.)
 - Implementation error → caught, shown in the final Summary table; the loop continues; non-zero exit code.
 
 ---

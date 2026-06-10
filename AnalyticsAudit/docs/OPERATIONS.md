@@ -305,6 +305,21 @@ Restoration is simply copying the backup back over `data/analytics.db` while no 
 
 Per-platform credentials (including Page Access Tokens for Instagram + Facebook Pages) live in the `platform_accounts.credentials` column as a JSON blob whose shape is defined by each platform's onboarding code. Stored as plain text. The database is local; this is acceptable for v0 single-user CLI use. The DB file is in `.gitignore` and must not be committed.
 
+## Facebook Page audit (thin v1, development mode only)
+
+The Facebook Page audit ships in **thin v1** form: it captures Page identity (followers, fans, page name) and a post inventory (id, type, message, posted-at, permalink) but **no engagement data**. Reactions, comments, shares, per-post reach, page-level insights, and CTA clicks are all gated behind **Meta App Review** for the `pages_read_engagement` scope. Page demographics were also removed by Meta in Graph v22+ and aren't accessible at all.
+
+What `npm run audit -- --client <short>` does on a `facebook_page` platform_account today:
+
+1. Fetches Page profile → `followers_count`, `fan_count`, `name`.
+2. Lists the most recent ~50 posts → id, type, message, timestamp, permalink.
+3. Persists a snapshot + account_metrics + N post_metrics rows. Engagement fields (`like_count`, `comments_count`) are stored as 0 with `platform_extras.engagement_pending_app_review=true` so the report renderer shows a banner instead of misleading zeros.
+4. Regenerates the Markdown rolling report at `reports/<short>/facebook_page/rolling.md` and the HTML trend report at `reports/<short>/facebook_page/trend/<timestamp>.html`. Both prominently flag the App Review gap.
+
+The thin audit is still useful: weekly snapshots build a follower-growth trajectory and a content-inventory archive even without engagement metrics. When App Review approves the scope, the same snapshots become much richer without any schema changes.
+
+See [docs/APP_REVIEW.md](APP_REVIEW.md) for what's blocked specifically, what's deprecated, and the step-by-step submission process.
+
 ## Diagnostics
 
 `npm run test:instagram` runs `src/platforms/instagram/live-test.ts`, which hits all four wrapper functions against the bootstrap account in `.env.local`. Use it when:
@@ -314,3 +329,9 @@ Per-platform credentials (including Page Access Tokens for Instagram + Facebook 
 - Sanity-checking the wrapper after dependency upgrades
 
 Expected output: profile counts, account insights (likely 0/0 for low-activity accounts), 5 most recent media with id/type/timestamp/caption, per-media insights for the first 3 (returns `null` for pre-conversion media).
+
+### Facebook Page wrappers
+
+- `npm run test:facebook-page -- --client <short>` — smoke test for the FB Page wrapper. Calls only what works in development mode (profile + posts list). Note at the bottom reminds the operator that insights/reactions/comments/shares require App Review.
+- `npm run probe:facebook-page -- --client <short>` — diagnostic that hits each candidate page-level and per-post metric individually and reports which return HTTP 200 in the current Graph API version. Use after Meta bumps the API version to find which metric names got deprecated. The probe only checks HTTP status, not response payload — a 200 with `data: []` is still recorded as "✓"; use `debug:facebook-page` to inspect response bodies.
+- `npm run debug:facebook-page -- --client <short>` — dumps raw JSON for a curated set of calls (page insights, post field expansion, demographic candidates, token introspection). Use when you need to see exactly what Meta is sending back, especially after API changes or to confirm whether silent empty responses are App-Review-gated vs genuinely zero-data.

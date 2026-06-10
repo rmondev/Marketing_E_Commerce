@@ -193,9 +193,16 @@ AnalyticsAudit/
 │       │   ├── onboarding.ts             # IG-specific onboarding prompts (registry-bound)
 │       │   ├── trend-report.ts           # HTML trend report builder (Chart.js, donuts, sparklines)
 │       │   └── types.ts                  # zod response schemas + MediaType + METRICS_BY_TYPE + AUDIENCE_TYPE_CONFIG
-│       ├── facebook-page/                # Onboarding ready; audit + reports pending
-│       │   ├── index.ts                  # PlatformHandle with capabilities.onboarding=true
-│       │   └── onboarding.ts             # Page ID + Page Token prompts
+│       ├── facebook-page/                # Thin v1: profile + post inventory (engagement gated by Meta App Review)
+│       │   ├── api.ts                    # Graph API wrapper, FacebookApiError
+│       │   ├── audit.ts                  # runFacebookPageAudit — captures profile + posts metadata
+│       │   ├── index.ts                  # PlatformHandle with capabilities.audit/reports/onboarding=true
+│       │   ├── live-test.ts              # Live smoke test (dev-mode endpoints only)
+│       │   ├── markdown-report.ts        # Markdown rolling report with App Review banner
+│       │   ├── onboarding.ts             # Page ID + Page Token prompts
+│       │   ├── probe-metrics.ts          # Diagnostic — probes which metric names survive in current Graph version
+│       │   ├── trend-report.ts           # HTML trend report (3 KPI cards + sparklines + posts table)
+│       │   └── types.ts                  # zod response schemas + post type resolver
 │       └── tiktok/                       # Onboarding placeholder; audit + reports + OAuth pending
 │           ├── index.ts                  # PlatformHandle with capabilities.onboarding=true
 │           └── onboarding.ts             # Handle + paste-token prompts (OAuth flow comes with audit)
@@ -204,6 +211,7 @@ AnalyticsAudit/
 ├── docs/ARCHITECTURE.md                  # System architecture — mental model + schema + registry + cookbook
 ├── docs/OPERATIONS.md                    # Operator runbook
 ├── docs/NEW_CLIENT_ONBOARDING.md         # Step-by-step new-client walkthrough
+├── docs/APP_REVIEW.md                    # Meta App Review process (unblocks the FB Page engagement audit)
 ├── .env.example                          # Committed template
 ├── .env.local                            # Credentials (gitignored)
 └── CONTEXT.md                            # Purpose & non-goals

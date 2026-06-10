@@ -13,83 +13,119 @@ import { toEtTimestamp } from "../core/lib/time.js";
 
 const ENV_FILE = ".env.local";
 
+// Token refresh today supports any platform that uses the FB Graph
+// User-Token → Page-Token derivation flow: Instagram (Page Token derived
+// for the linked Facebook Page) and Facebook Page (Page Token derived for
+// the Page itself). TikTok and future OAuth platforms will register their
+// own refresh logic when the registry becomes refresh-aware.
+const SUPPORTED_PLATFORMS = ["instagram", "facebook_page"] as const;
+type SupportedPlatform = (typeof SUPPORTED_PLATFORMS)[number];
+const DEFAULT_PLATFORM: SupportedPlatform = "instagram";
+
 const program = new Command();
 program
   .name("token:refresh")
   .description(
-    "Exchange a short-lived User Token from the Graph API Explorer for a long-lived (~60 day) Page Access Token, store it on a client, and optionally update .env.local.",
+    "Exchange a short-lived User Token from the Graph API Explorer for a long-lived (~60 day) Page Access Token, store it on a client's platform_account, and optionally update .env.local.",
   )
-  .option("--client <shortName>", "Client short_name to update (prompts if omitted and >1 client exists)")
+  .option("--client <shortName>", "Client short_name to update (prompts if omitted and >1 client matches)")
+  .option(
+    "--platform <name>",
+    `Which platform's token to refresh: ${SUPPORTED_PLATFORMS.join(" | ")}. Default: ${DEFAULT_PLATFORM}.`,
+  )
   .option(
     "--user-token <token>",
     "Short-lived User Token from Graph API Explorer (prompts hidden if omitted)",
   )
   .option(
     "--update-env",
-    "Also update META_PAGE_ACCESS_TOKEN in .env.local without prompting",
+    "Also update META_PAGE_ACCESS_TOKEN in .env.local without prompting (only applies to instagram)",
   );
 
 program.parse();
 
 type RawOpts = {
   client?: string;
+  platform?: string;
   userToken?: string;
   updateEnv?: boolean;
 };
 const rawOpts = program.opts() as RawOpts;
 
-// Token refresh is currently IG-only. Each row joins clients to its
-// Instagram platform_account so we have the fb_page_id from the
-// credentials JSON. Phase D's registry will let other platforms register
-// their own refresh logic; this file stays IG-specific.
-type ClientRow = {
+// Resolve target platform up front. Default to instagram to preserve the
+// previous single-platform call signature.
+const targetPlatform: SupportedPlatform = (() => {
+  const p = rawOpts.platform ?? DEFAULT_PLATFORM;
+  if (!SUPPORTED_PLATFORMS.includes(p as SupportedPlatform)) {
+    console.error(
+      `Unsupported --platform '${p}'. Supported: ${SUPPORTED_PLATFORMS.join(", ")}.`,
+    );
+    process.exit(1);
+  }
+  return p as SupportedPlatform;
+})();
+
+type Row = {
   client_id: number;
   short_name: string;
   display_name: string;
   platform_account_id: number;
+  external_account_id: string;
   credentials: string;
 };
-type InstagramCredentials = {
-  page_access_token: string;
-  fb_page_id?: string;
-};
-
-const clientRows = db
+const rows = db
   .prepare(
     `SELECT c.id AS client_id, c.short_name, c.display_name,
-            pa.id AS platform_account_id, pa.credentials
+            pa.id AS platform_account_id, pa.external_account_id, pa.credentials
        FROM clients c
        JOIN platform_accounts pa ON pa.client_id = c.id
-       WHERE pa.platform = 'instagram'
+       WHERE pa.platform = ?
        ORDER BY c.id`,
   )
-  .all() as ClientRow[];
+  .all(targetPlatform) as Row[];
 
-type ClientWithCreds = ClientRow & { fb_page_id: string };
-const clients: ClientWithCreds[] = clientRows.map((c) => {
-  const creds = JSON.parse(c.credentials) as InstagramCredentials;
-  if (creds.fb_page_id === undefined) {
-    throw new Error(
-      `Platform account for client '${c.short_name}' is missing fb_page_id in credentials JSON.`,
-    );
-  }
-  return { ...c, fb_page_id: creds.fb_page_id };
-});
-
-if (clients.length === 0) {
-  console.error("No clients in the database. Run 'npm run client:add' first.");
+if (rows.length === 0) {
+  console.error(
+    `No '${targetPlatform}' platform_accounts in the database.` +
+      (targetPlatform === "instagram"
+        ? " Run 'npm run client:add' first."
+        : ` Attach one with: npm run client:platform:add -- --platform ${targetPlatform}`),
+  );
   process.exit(1);
 }
+
+// Each row exposes a `page_id_for_derive` — the FB Page numeric ID we'll
+// pass to /<page-id>?fields=access_token. For IG, that ID lives inside the
+// credentials JSON (fb_page_id). For FB Page, it IS the external_account_id.
+type Candidate = Row & { page_id_for_derive: string; parsed_credentials: Record<string, unknown> };
+const candidates: Candidate[] = rows.map((r) => {
+  const creds = JSON.parse(r.credentials) as Record<string, unknown>;
+  let pageId: string;
+  if (targetPlatform === "instagram") {
+    const fb = creds["fb_page_id"];
+    if (typeof fb !== "string") {
+      throw new Error(
+        `Instagram platform_account for '${r.short_name}' is missing fb_page_id in credentials JSON. Re-onboard.`,
+      );
+    }
+    pageId = fb;
+  } else {
+    pageId = r.external_account_id;
+  }
+  return { ...r, page_id_for_derive: pageId, parsed_credentials: creds };
+});
 
 // 1. Resolve target client
 let targetShortName = rawOpts.client;
 if (targetShortName === undefined) {
-  if (clients.length === 1) {
-    targetShortName = clients[0]!.short_name;
-    console.log(`Refreshing token for sole client: ${targetShortName}`);
+  if (candidates.length === 1) {
+    targetShortName = candidates[0]!.short_name;
+    console.log(
+      `Refreshing ${targetPlatform} token for sole client: ${targetShortName}`,
+    );
   } else {
-    console.log("Configured clients:");
-    for (const c of clients) {
+    console.log(`Configured clients with a ${targetPlatform} platform_account:`);
+    for (const c of candidates) {
       console.log(`  - ${c.short_name}  (${c.display_name})`);
     }
     const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -98,9 +134,11 @@ if (targetShortName === undefined) {
   }
 }
 
-const client = clients.find((c) => c.short_name === targetShortName);
-if (!client) {
-  console.error(`No client with short_name '${targetShortName}'.`);
+const target = candidates.find((c) => c.short_name === targetShortName);
+if (!target) {
+  console.error(
+    `No '${targetPlatform}' platform_account for client '${targetShortName}'.`,
+  );
   process.exit(1);
 }
 
@@ -129,8 +167,13 @@ const exchange = await exchangeForLongLivedToken(
 console.log(`  Long-lived user token: ${maskToken(exchange.access_token)}`);
 
 // 4. Derive Page Access Token
-console.log(`\nDeriving Page Access Token for page ${client.fb_page_id}...`);
-const pageToken = await getPageAccessToken(client.fb_page_id, exchange.access_token);
+console.log(
+  `\nDeriving Page Access Token for page ${target.page_id_for_derive}...`,
+);
+const pageToken = await getPageAccessToken(
+  target.page_id_for_derive,
+  exchange.access_token,
+);
 console.log(`  Page token: ${maskToken(pageToken)}`);
 
 // 5. Inspect expiry via /debug_token
@@ -149,49 +192,62 @@ if (!debug.is_valid) {
   process.exit(1);
 }
 
-// 6. Update DB — replace the page_access_token field inside the credentials
-// JSON for this client's Instagram platform_account. fb_page_id stays put.
-const newCredsJson = JSON.stringify({
+// 6. Update DB. Preserve every existing credentials field (fb_page_id for
+// IG, future fields for other platforms) — only the page_access_token is
+// being rotated.
+const newCreds = {
+  ...target.parsed_credentials,
   page_access_token: pageToken,
-  fb_page_id: client.fb_page_id,
-});
+};
 db.prepare(
   "UPDATE platform_accounts SET credentials = ? WHERE id = ?",
-).run(newCredsJson, client.platform_account_id);
+).run(JSON.stringify(newCreds), target.platform_account_id);
 console.log(
-  `\nUpdated platform_accounts.credentials for '${client.short_name}' (platform_account_id=${client.platform_account_id}).`,
+  `\nUpdated platform_accounts.credentials for '${target.short_name}' / ${targetPlatform} (platform_account_id=${target.platform_account_id}).`,
 );
 
-// 7. Optionally update .env.local
-let updateEnv = rawOpts.updateEnv;
-if (updateEnv === undefined) {
-  const defaultYes = client.short_name === "rmondev";
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const ans = (
-    await rl.question(
-      `\nAlso update META_PAGE_ACCESS_TOKEN in ${ENV_FILE}? [${defaultYes ? "Y/n" : "y/N"}] `,
+// 7. Optionally update .env.local. Only meaningful for instagram (the env
+// var is the bootstrap token used by `npm run test:instagram`). Skip the
+// prompt entirely for other platforms.
+if (targetPlatform === "instagram") {
+  let updateEnv = rawOpts.updateEnv;
+  if (updateEnv === undefined) {
+    const defaultYes = target.short_name === "rmondev";
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const ans = (
+      await rl.question(
+        `\nAlso update META_PAGE_ACCESS_TOKEN in ${ENV_FILE}? [${defaultYes ? "Y/n" : "y/N"}] `,
+      )
     )
-  )
-    .trim()
-    .toLowerCase();
-  rl.close();
-  updateEnv = ans === "" ? defaultYes : ans === "y" || ans === "yes";
-}
-
-if (updateEnv) {
-  const envContent = readFileSync(ENV_FILE, "utf-8");
-  const updated = envContent.replace(
-    /^META_PAGE_ACCESS_TOKEN=.*$/m,
-    `META_PAGE_ACCESS_TOKEN=${pageToken}`,
-  );
-  if (updated === envContent) {
-    console.error(
-      `Could not find a META_PAGE_ACCESS_TOKEN= line in ${ENV_FILE}; not modified.`,
-    );
-    process.exit(1);
+      .trim()
+      .toLowerCase();
+    rl.close();
+    updateEnv = ans === "" ? defaultYes : ans === "y" || ans === "yes";
   }
-  writeFileSync(ENV_FILE, updated, "utf-8");
-  console.log(`Updated ${ENV_FILE}.`);
+
+  if (updateEnv) {
+    const envContent = readFileSync(ENV_FILE, "utf-8");
+    const updated = envContent.replace(
+      /^META_PAGE_ACCESS_TOKEN=.*$/m,
+      `META_PAGE_ACCESS_TOKEN=${pageToken}`,
+    );
+    if (updated === envContent) {
+      console.error(
+        `Could not find a META_PAGE_ACCESS_TOKEN= line in ${ENV_FILE}; not modified.`,
+      );
+      process.exit(1);
+    }
+    writeFileSync(ENV_FILE, updated, "utf-8");
+    console.log(`Updated ${ENV_FILE}.`);
+  }
+} else if (rawOpts.updateEnv === true) {
+  console.log(
+    `\nNote: --update-env is a no-op for ${targetPlatform} (META_PAGE_ACCESS_TOKEN is the IG bootstrap only).`,
+  );
 }
 
-console.log(`\nDone. Next: npm run audit -- --client ${client.short_name}`);
+const nextCmd =
+  targetPlatform === "facebook_page"
+    ? `npm run test:facebook-page -- --client ${target.short_name}`
+    : `npm run audit -- --client ${target.short_name}`;
+console.log(`\nDone. Next: ${nextCmd}`);
