@@ -1,110 +1,332 @@
-// TikTok onboarding — placeholder. Collects a handle/username and an
-// access token by direct paste. The real OAuth/PKCE flow comes when the
-// TikTok audit implementation lands; today this just persists whatever
-// the operator provides so the platform_account row exists.
+// TikTok onboarding via OAuth 2.0 + PKCE.
+//
+// Flow:
+//   1. Verify TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET are in .env.local.
+//   2. Generate PKCE code_verifier + code_challenge and a CSRF state token.
+//   3. Spin up a one-shot HTTP server on the redirect-URI port (default :3001).
+//   4. Open the operator's default browser to TikTok's authorize URL.
+//   5. User (or operator-as-user) logs in and approves.
+//   6. TikTok redirects to our localhost callback with `code` + `state`.
+//   7. Validate state matches (CSRF guard).
+//   8. Exchange code + code_verifier for access_token + refresh_token.
+//   9. Fetch user info with the fresh access_token for display_name/username.
+//  10. Persist tokens + open_id (as external_account_id) + display_handle.
+//
+// Times out after 5 minutes if no callback arrives — the operator can retry.
 
-import { createInterface, type Interface } from "node:readline/promises";
+import { exec } from "node:child_process";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { URL } from "node:url";
 import { z } from "zod";
-import { askMasked } from "../../core/lib/prompt.js";
+import { env } from "../../core/lib/env.js";
 import type {
   PlatformOnboardingInput,
   PlatformOnboardingResult,
 } from "../_registry.js";
+import {
+  buildAuthorizationUrl,
+  DEFAULT_REDIRECT_URI,
+  deriveCodeChallenge,
+  exchangeCodeForTokens,
+  generateCodeVerifier,
+  generateState,
+  TikTokAuthError,
+  type TikTokTokens,
+} from "./oauth.js";
 
-const handleSchema = z
-  .string()
-  .trim()
-  .min(1, "must be non-empty")
-  .regex(/^@?[A-Za-z0-9_.]+$/, "must look like a TikTok handle, e.g. @rmondev");
-const tokenSchema = z.string().trim().min(20, "looks too short");
+const CALLBACK_PATH = "/oauth/tiktok/callback";
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
-const FLAG_HANDLE = "tiktokHandle";
-const FLAG_TOKEN = "tiktokAccessToken";
+const userInfoSchema = z.object({
+  data: z.object({
+    user: z.object({
+      open_id: z.string(),
+      display_name: z.string().optional(),
+      username: z.string().optional(),
+    }),
+  }),
+});
 
 export async function onboardTikTok(
-  input: PlatformOnboardingInput,
+  _input: PlatformOnboardingInput,
 ): Promise<PlatformOnboardingResult> {
-  const { flagValues, interactive } = input;
-  let rl: Interface | undefined =
-    interactive && flagValues[FLAG_HANDLE] === undefined
-      ? createInterface({ input: process.stdin, output: process.stdout })
-      : undefined;
-  try {
-    const handle = await resolveField(
-      "tiktok-handle",
-      flagValues[FLAG_HANDLE],
-      "TikTok handle (e.g. @rmondev)",
-      handleSchema,
-      interactive,
-      rl,
+  if (
+    env.TIKTOK_CLIENT_KEY === undefined ||
+    env.TIKTOK_CLIENT_KEY === "" ||
+    env.TIKTOK_CLIENT_SECRET === undefined ||
+    env.TIKTOK_CLIENT_SECRET === ""
+  ) {
+    throw new Error(
+      "TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET must be set in .env.local before onboarding a TikTok account. See docs/TIKTOK_SETUP.md.",
     );
-    if (rl !== undefined) {
-      rl.close();
-      rl = undefined;
-    }
-    const accessToken = await resolveField(
-      "tiktok-access-token",
-      flagValues[FLAG_TOKEN],
-      "Access Token (input hidden)",
-      tokenSchema,
-      interactive,
-      undefined,
-      { masked: true },
-    );
-
-    // Strip leading @ for the external_account_id; preserve it for display.
-    const stripped = handle.startsWith("@") ? handle.slice(1) : handle;
-    return {
-      external_account_id: stripped,
-      display_handle: handle.startsWith("@") ? handle : `@${stripped}`,
-      credentials: JSON.stringify({
-        access_token: accessToken,
-        // refresh_token + expires_at slots reserved for the future
-        // OAuth/PKCE flow.
-      }),
-    };
-  } finally {
-    if (rl !== undefined) rl.close();
   }
-}
+  const clientKey = env.TIKTOK_CLIENT_KEY;
+  const clientSecret = env.TIKTOK_CLIENT_SECRET;
+  const redirectUri = env.TIKTOK_REDIRECT_URI ?? DEFAULT_REDIRECT_URI;
 
-async function resolveField<T extends string>(
-  flagName: string,
-  flagValue: string | undefined,
-  promptLabel: string,
-  schema: z.ZodType<T>,
-  interactive: boolean,
-  rl: Interface | undefined,
-  options: { masked?: boolean } = {},
-): Promise<T> {
-  if (flagValue !== undefined) {
-    const parsed = schema.safeParse(flagValue);
-    if (!parsed.success) {
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = deriveCodeChallenge(codeVerifier);
+  const state = generateState();
+  const authUrl = buildAuthorizationUrl({
+    clientKey,
+    redirectUri,
+    codeChallenge,
+    state,
+  });
+
+  const parsedRedirect = new URL(redirectUri);
+  const port = Number(parsedRedirect.port || "80");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid port in TIKTOK_REDIRECT_URI: ${redirectUri}`);
+  }
+
+  console.log("\n  Starting TikTok OAuth flow...");
+  console.log(`  Local callback server: ${redirectUri}`);
+  console.log("");
+  console.log(
+    "  Opening your browser to the TikTok authorization page. If the browser",
+  );
+  console.log("  doesn't open automatically, copy this URL into one manually:");
+  console.log(`\n  ${authUrl}\n`);
+
+  const callback = await runCallbackServer(port, state, authUrl);
+  const { code } = callback;
+
+  console.log("\n  Exchanging code for tokens...");
+  let tokens: TikTokTokens;
+  try {
+    tokens = await exchangeCodeForTokens({
+      clientKey,
+      clientSecret,
+      code,
+      codeVerifier,
+      redirectUri,
+    });
+  } catch (err) {
+    if (err instanceof TikTokAuthError) {
       throw new Error(
-        `Invalid --${flagName}: ${parsed.error.issues[0]?.message ?? "invalid"}`,
+        `TikTok token exchange failed: ${err.message}` +
+          (err.logId !== undefined ? ` (log_id=${err.logId})` : ""),
       );
     }
-    return parsed.data;
+    throw err;
   }
-  if (!interactive) {
+
+  console.log("  Token exchange OK.");
+  console.log(`    open_id:    ${tokens.open_id}`);
+  console.log(`    scope:      ${tokens.scope}`);
+  console.log(`    expires_at: ${tokens.expires_at_iso} (access ~24h)`);
+  console.log(`    refresh_at: ${tokens.refresh_expires_at_iso} (refresh ~365d)`);
+
+  console.log("\n  Fetching user info for display name...");
+  const userInfo = await fetchUserInfo(tokens.access_token);
+  const displayName = userInfo.display_name ?? userInfo.username ?? tokens.open_id;
+  const username = userInfo.username ?? "";
+  console.log(
+    `    display_name=${displayName}${username !== "" ? `  @${username}` : ""}`,
+  );
+
+  // external_account_id is the stable, opaque TikTok ID — open_id is the
+  // right anchor since usernames can change but open_id is permanent for
+  // an (app, user) pair.
+  const result: PlatformOnboardingResult = {
+    external_account_id: tokens.open_id,
+    credentials: JSON.stringify({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at_iso: tokens.expires_at_iso,
+      refresh_expires_at_iso: tokens.refresh_expires_at_iso,
+      open_id: tokens.open_id,
+      scope: tokens.scope,
+      display_name: displayName,
+      username,
+    }),
+  };
+  if (username !== "") result.display_handle = `@${username}`;
+  return result;
+}
+
+// ─── Local callback server ────────────────────────────────────────────────
+
+type CallbackResult = { code: string };
+
+function runCallbackServer(
+  port: number,
+  expectedState: string,
+  authUrl: string,
+): Promise<CallbackResult> {
+  return new Promise((resolve, reject) => {
+    const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+      const reqUrl = new URL(req.url ?? "", `http://localhost:${port}`);
+      if (reqUrl.pathname !== CALLBACK_PATH) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Not found");
+        return;
+      }
+      const code = reqUrl.searchParams.get("code");
+      const state = reqUrl.searchParams.get("state");
+      const error = reqUrl.searchParams.get("error");
+      const errorDescription = reqUrl.searchParams.get("error_description");
+
+      if (error !== null) {
+        respondHtml(
+          res,
+          400,
+          `<h1>TikTok authorization failed</h1><p>${escapeHtml(error)}${
+            errorDescription !== null
+              ? `: ${escapeHtml(errorDescription)}`
+              : ""
+          }</p><p>You can close this tab.</p>`,
+        );
+        server.close();
+        reject(
+          new Error(
+            `TikTok authorization denied: ${error}${
+              errorDescription !== null ? ` — ${errorDescription}` : ""
+            }`,
+          ),
+        );
+        return;
+      }
+      if (code === null || state === null) {
+        respondHtml(
+          res,
+          400,
+          "<h1>Missing parameters</h1><p>TikTok did not return a code. Please retry the onboarding command.</p>",
+        );
+        server.close();
+        reject(new Error("Callback missing required code or state parameter"));
+        return;
+      }
+      if (state !== expectedState) {
+        respondHtml(
+          res,
+          400,
+          "<h1>State mismatch</h1><p>This may indicate a CSRF attempt. Please retry the onboarding command.</p>",
+        );
+        server.close();
+        reject(
+          new Error(
+            "CSRF state mismatch: returned state does not match the one issued. Aborting.",
+          ),
+        );
+        return;
+      }
+      respondHtml(
+        res,
+        200,
+        "<h1>Authorization complete</h1><p>You can close this tab and return to the terminal.</p>",
+      );
+      server.close();
+      resolve({ code });
+    });
+
+    server.on("error", (err) => {
+      reject(
+        new Error(
+          `Failed to start local callback server on port ${port}: ${err.message}`,
+        ),
+      );
+    });
+
+    const timeoutHandle = setTimeout(() => {
+      server.close();
+      reject(
+        new Error(
+          `TikTok OAuth timed out after ${Math.floor(AUTH_TIMEOUT_MS / 1000)}s — no callback received.`,
+        ),
+      );
+    }, AUTH_TIMEOUT_MS);
+    // Don't keep the process alive solely on the timeout — once the server
+    // closes the timeout is cleared via the resolve/reject path.
+    server.on("close", () => clearTimeout(timeoutHandle));
+
+    server.listen(port, "127.0.0.1", () => {
+      // Server is ready; open the browser. Failures here are non-fatal —
+      // the URL is also printed to stdout so the operator can paste it
+      // manually if their browser is misconfigured.
+      openBrowser(authUrl).catch((err) => {
+        console.warn(`  (browser open failed: ${err.message})`);
+      });
+    });
+  });
+}
+
+function openBrowser(url: string): Promise<void> {
+  // Best-effort. Failures are non-fatal — the URL is also printed to stdout
+  // so the operator can paste it manually.
+  const platform = process.platform;
+  let cmd: string;
+  if (platform === "win32") {
+    // Windows `start` needs an empty title arg because the first quoted
+    // string is interpreted as the window title.
+    cmd = `start "" "${url}"`;
+  } else if (platform === "darwin") {
+    cmd = `open "${url}"`;
+  } else {
+    cmd = `xdg-open "${url}"`;
+  }
+  return new Promise((resolve, reject) => {
+    exec(cmd, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+function respondHtml(
+  res: ServerResponse,
+  status: number,
+  body: string,
+): void {
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"><title>AnalyticsAudit OAuth</title>
+<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:560px;margin:4rem auto;padding:0 1.5rem;color:#111;line-height:1.5}h1{font-size:1.4rem}</style>
+</head><body>${body}</body></html>`;
+  res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// ─── User info fetch ──────────────────────────────────────────────────────
+
+// Pre-G2 minimal inline call — once api.ts exists, swap to the wrapper.
+async function fetchUserInfo(
+  accessToken: string,
+): Promise<{ open_id: string; display_name?: string; username?: string }> {
+  const url = new URL("https://open.tiktokapis.com/v2/user/info/");
+  url.searchParams.set("fields", "open_id,display_name,username");
+  const res = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Cache-Control": "no-cache",
+    },
+  });
+  const raw = (await res.json().catch(() => null)) as unknown;
+  if (!res.ok) {
     throw new Error(
-      `Missing required flag --${flagName} (non-interactive mode).`,
+      `TikTok user info call failed: HTTP ${res.status} ${JSON.stringify(raw).slice(0, 200)}`,
     );
   }
-  if (!options.masked && rl === undefined) {
+  const parsed = userInfoSchema.safeParse(raw);
+  if (!parsed.success) {
     throw new Error(
-      `Internal: needed readline for --${flagName} prompt but none was provided.`,
+      `TikTok user info response shape unexpected: ${parsed.error.message}`,
     );
   }
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const raw = options.masked
-      ? await askMasked(`${promptLabel}: `)
-      : await rl!.question(`${promptLabel}: `);
-    const parsed = schema.safeParse(raw);
-    if (parsed.success) return parsed.data;
-    console.error(
-      `  ${parsed.error.issues[0]?.message ?? "invalid"} (try again)`,
-    );
+  const out: { open_id: string; display_name?: string; username?: string } = {
+    open_id: parsed.data.data.user.open_id,
+  };
+  if (parsed.data.data.user.display_name !== undefined) {
+    out.display_name = parsed.data.data.user.display_name;
   }
-  throw new Error(`Too many invalid attempts for ${promptLabel}.`);
+  if (parsed.data.data.user.username !== undefined) {
+    out.username = parsed.data.data.user.username;
+  }
+  return out;
 }

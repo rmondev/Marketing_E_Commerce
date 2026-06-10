@@ -9,6 +9,13 @@ const envSchema = z.object({
   META_PAGE_ACCESS_TOKEN: z.string().min(1, "missing or empty"),
   META_INSTAGRAM_BUSINESS_ACCT_ID: z.string().min(1, "missing or empty"),
   META_PAGE_ID: z.string().min(1, "missing or empty"),
+  // TikTok credentials are optional at env-load — the audit, onboarding,
+  // and refresh commands check them only when the operator actually uses
+  // a TikTok platform_account. Operators who only use Meta don't need
+  // these.
+  TIKTOK_CLIENT_KEY: z.string().optional(),
+  TIKTOK_CLIENT_SECRET: z.string().optional(),
+  TIKTOK_REDIRECT_URI: z.string().url().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
