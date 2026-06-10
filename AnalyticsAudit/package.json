@@ -18,6 +18,7 @@
     "test:instagram": "tsx src/platforms/instagram/live-test.ts",
     "test:facebook-page": "tsx src/platforms/facebook-page/live-test.ts",
     "test:tiktok": "tsx src/platforms/tiktok/live-test.ts",
+    "tiktok:mint": "tsx src/platforms/tiktok/mint.ts",
     "probe:facebook-page": "tsx src/platforms/facebook-page/probe-metrics.ts",
     "debug:facebook-page": "tsx src/platforms/facebook-page/debug-raw.ts",
     "probe:fb-insights": "tsx src/platforms/facebook-page/probe-insights.ts",

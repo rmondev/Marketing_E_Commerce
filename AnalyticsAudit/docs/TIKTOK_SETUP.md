@@ -145,7 +145,16 @@ npm run client:platform:add -- --client symmetry-esthetics --platform tiktok `
 
 ### How to obtain the tokens
 
-You need an access_token + refresh_token pair for the target TikTok account (Symmetry in our case). Options:
+You need an access_token + refresh_token pair for the target TikTok account (Symmetry in our case). Options, easiest first:
+
+0. **`npm run tiktok:mint` (recommended).** A built-in helper that drives the browser authorization, captures the `code`, and tries the code→token exchange across request-shape variants — isolating the sandbox-bug variables for you. Defaults to PKCE `plain` (validated by string equality, sidestepping the possibly-broken S256 hash compare):
+
+   ```powershell
+   npm run tiktok:mint                  # PKCE plain — try this first
+   npm run tiktok:mint -- --method s256 # fall back to S256 if plain fails
+   ```
+
+   It opens TikTok's consent screen (log in as the **target** account), then on success prints the `access_token` + `refresh_token` and the exact `client:platform:add` command to persist them. Authorize promptly — the `code` expires within minutes.
 
 1. **TikTok's developer-portal "Try API" tool** — some app detail pages have a section that completes OAuth + token exchange on TikTok's own infrastructure (bypassing whatever's broken about cross-origin/PKCE exchange to our app). Look for a "Test API" / "Sandbox Test" / "OAuth Playground" button.
 2. **Postman + TikTok's published collection** — TikTok publishes a Postman collection for Login Kit. Import it, configure your `CLIENT_KEY` / `CLIENT_SECRET` / `REDIRECT_URI`, run the OAuth flow inside Postman. Postman handles PKCE itself and seems immune to the bug. You'll have `access_token` and `refresh_token` in the response.
