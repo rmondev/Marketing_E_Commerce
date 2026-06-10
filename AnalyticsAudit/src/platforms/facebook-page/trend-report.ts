@@ -279,10 +279,18 @@ function buildDonuts(rows: DemographicRow[]): DonutChart[] {
       buckets,
       DEMOGRAPHIC_TOP_N,
     );
-    const labels = head.map((b) => expandBucketLabel(dim, b.bucket));
+    // Legend labels include the follower count, e.g. "Canada (258)" —
+    // mirrors the IG audience donuts so a viewer can read absolute numbers
+    // off the legend without hovering the tooltip.
+    const labels = head.map(
+      (b) =>
+        `${expandBucketLabel(dim, b.bucket)} (${b.value.toLocaleString("en-US")})`,
+    );
     const data = head.map((b) => b.value);
     if (otherCount > 0) {
-      labels.push(`Other (${otherCount})`);
+      labels.push(
+        `Other (${otherCount} more) (${otherValue.toLocaleString("en-US")})`,
+      );
       data.push(otherValue);
     }
     out.push({
@@ -551,7 +559,7 @@ for (const chart of donuts) {
             label: (ctx) => {
               const v = ctx.parsed;
               const pct = total > 0 ? Math.round((v / total) * 100) : 0;
-              return ctx.label + ": " + v + " (" + pct + "%)";
+              return ctx.label + ": " + pct + "%";
             },
           },
         },
