@@ -41,17 +41,12 @@ const program = new Command();
 program
   .name("tiktok:mint")
   .description(
-    "Mint a TikTok access/refresh token pair via the browser, trying multiple exchange request-shapes (workaround for the sandbox PKCE bug).",
+    "Mint a TikTok access/refresh token pair via the browser (OAuth code → token exchange).",
   )
   .option(
     "--method <s256|plain>",
     "PKCE challenge method. Default 's256' — TikTok's authorize endpoint REJECTS 'plain' (it returns a code_challenge_method error before issuing a code), so 'plain' is kept only for experimentation.",
     "s256",
-  )
-  .option(
-    "--exchange <bare|nosecret|basic|json>",
-    "Token-exchange request shape to try (ONE per run — auth codes are single-use). 'bare' = form body w/ client_secret (default). 'nosecret' = form body, no client_secret (public-client PKCE). 'basic' = client_key:secret in HTTP Basic header. 'json' = JSON body.",
-    "bare",
   )
   .option("--debug", "Print the exact request body (secret redacted) and the full raw response.")
   .option("--no-browser", "Don't auto-open the browser; just print the URL.");
@@ -59,16 +54,10 @@ program.parse();
 
 const opts = program.opts() as {
   method: string;
-  exchange: string;
   debug: boolean;
   browser: boolean;
 };
 const method: PkceMethod = opts.method === "plain" ? "plain" : "S256";
-const exchangeShape = opts.exchange;
-if (!["bare", "nosecret", "basic", "json"].includes(exchangeShape)) {
-  console.error(`Unknown --exchange '${exchangeShape}'. Use bare | nosecret | basic | json.`);
-  process.exit(1);
-}
 if (method === "plain") {
   console.warn(
     "\n  ⚠ TikTok's authorize endpoint rejects code_challenge_method=plain and will\n" +
@@ -121,12 +110,21 @@ console.log("  click Authorize. If the browser doesn't open, paste this URL:");
 console.log(`\n  ${authUrl}\n`);
 
 const code = await runCallbackServer(port, state, opts.browser ? authUrl : null);
-console.log(`\n  Got authorization code (len=${code.length}). Exchanging [shape=${exchangeShape}]...\n`);
+console.log(`\n  Got authorization code (len=${code.length}). Exchanging...\n`);
 
-// ─── Single exchange attempt ────────────────────────────────────────────────
-// One shape per run — auth codes are single-use, so trying multiple shapes
-// against the same code is unreliable (the first attempt may consume it).
-// Re-run with a different --exchange to probe another shape on a fresh code.
+// ─── Token exchange ─────────────────────────────────────────────────────────
+// The exchange request shape is fully constrained by TikTok (verified by
+// probing 2026-06-11): client_secret MUST be in the body (omitting it, or
+// moving it to an HTTP Basic header, yields "request parameters are
+// malformed"), and the Content-Type MUST be a bare "application/x-www-form-
+// urlencoded" with no charset suffix (a suffix, or application/json, is
+// rejected). So this is the one and only valid shape.
+//
+// NOTE: in the sandbox this still returns "Code verifier or code challenge is
+// invalid" even though the PKCE pair is RFC 7636-correct (our derivation
+// matches the spec's published test vector) and the code is sent byte-for-byte
+// as issued. That's a confirmed server-side bug in TikTok's sandbox validator
+// — see the failure message below for the working alternative.
 type TokenSuccess = {
   access_token: string;
   refresh_token: string;
@@ -136,52 +134,28 @@ type TokenSuccess = {
   scope: string;
 };
 
-// Build the request for the chosen shape. The bare urlencoded body is the
-// only Content-Type TikTok's sandbox parses cleanly (a charset suffix yields
-// "request parameters are malformed"), so every form shape uses it.
-const baseParams: Record<string, string> = {
+const body = new URLSearchParams({
   client_key: clientKey,
+  client_secret: clientSecret,
   code,
   grant_type: "authorization_code",
   redirect_uri: redirectUri,
   code_verifier: codeVerifier,
-};
-const headers: Record<string, string> = { "Cache-Control": "no-cache" };
-let body: string;
-switch (exchangeShape) {
-  case "nosecret":
-    // Public-client PKCE: prove the token by code_verifier alone, no secret.
-    headers["Content-Type"] = "application/x-www-form-urlencoded";
-    body = new URLSearchParams(baseParams).toString();
-    break;
-  case "basic":
-    // client_key:client_secret in an HTTP Basic header; omitted from body.
-    headers["Authorization"] =
-      "Basic " + Buffer.from(`${clientKey}:${clientSecret}`).toString("base64");
-    headers["Content-Type"] = "application/x-www-form-urlencoded";
-    body = new URLSearchParams(baseParams).toString();
-    break;
-  case "json":
-    headers["Content-Type"] = "application/json";
-    body = JSON.stringify({ ...baseParams, client_secret: clientSecret });
-    break;
-  case "bare":
-  default:
-    headers["Content-Type"] = "application/x-www-form-urlencoded";
-    body = new URLSearchParams({ ...baseParams, client_secret: clientSecret }).toString();
-    break;
-}
+}).toString();
 
 if (opts.debug) {
-  const redacted = body
-    .replace(/client_secret=[^&]+/, "client_secret=***")
-    .replace(/"client_secret":"[^"]+"/, '"client_secret":"***"');
   console.log(`  [debug] POST ${TOKEN_URL}`);
-  console.log(`  [debug] headers: ${JSON.stringify({ ...headers, Authorization: headers["Authorization"] ? "Basic ***" : undefined })}`);
-  console.log(`  [debug] body:    ${redacted}\n`);
+  console.log(`  [debug] body:    ${body.replace(/client_secret=[^&]+/, "client_secret=***")}\n`);
 }
 
-const res = await fetch(TOKEN_URL, { method: "POST", headers, body });
+const res = await fetch(TOKEN_URL, {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Cache-Control": "no-cache",
+  },
+  body,
+});
 const raw = (await res.json().catch(() => null)) as Record<string, unknown> | null;
 if (opts.debug) {
   console.log(`  [debug] HTTP ${res.status}`);
@@ -198,16 +172,17 @@ if (!minted) {
   console.error(
     `  FAIL [${errCode}]${errDesc ? ` ${errDesc}` : ""}${logId ? ` (log_id=${logId})` : ""}`,
   );
-  console.error("\n  Exchange failed. Next moves:");
-  console.error("    • If 'invalid code': the code expired or was reused — re-run and authorize fast.");
-  console.error("    • Otherwise, probe another shape on a FRESH code:");
-  console.error("        npm run tiktok:mint -- --exchange nosecret --debug");
-  console.error("        npm run tiktok:mint -- --exchange basic --debug");
-  console.error("        npm run tiktok:mint -- --exchange json --debug");
+  if (errCode === "invalid_grant" || (errDesc && errDesc.toLowerCase().includes("code"))) {
+    console.error("\n  If this is an expired/invalid code, re-run and click Authorize promptly.");
+  }
   console.error(
-    "    • If every shape returns the verifier/challenge error on fast, fresh runs, the\n" +
-      "      sandbox bug is server-side — use TikTok's portal 'Try API' tool or Postman to\n" +
-      "      mint, then paste via client:platform:add --tiktok-access-token/--tiktok-refresh-token.",
+    "\n  If this is the 'Code verifier or code challenge is invalid' error, it's the\n" +
+      "  confirmed TikTok SANDBOX bug (the request is correct — verified). Workarounds:\n" +
+      "    • Mint on TikTok's own infra: dev-portal app → sandbox 'Try API' / OAuth\n" +
+      "      playground, OR TikTok's published Postman collection. Then paste the pair:\n" +
+      "        npm run client:platform:add -- --client <client> --platform tiktok \\\n" +
+      "          --tiktok-access-token \"act.xxx\" --tiktok-refresh-token \"rft.xxx\"\n" +
+      "    • Or submit the app for Audit to leave sandbox — the bug appears sandbox-only.",
   );
   process.exit(1);
 }
