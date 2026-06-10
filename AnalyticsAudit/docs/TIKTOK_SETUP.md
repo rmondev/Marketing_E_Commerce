@@ -162,6 +162,20 @@ When tokens are pasted via flags:
 
 The workaround is invisible to G2-G6 — the audit reads the same credentials shape regardless of whether tokens came from OAuth or manual paste.
 
+## Verify the API wrapper (Phase G2)
+
+Once you have an access token — whether minted via OAuth, the manual workaround, or pasted straight from Postman/the portal "Try API" tool — you can smoke-test the Display API wrapper before the full audit (Phase G3) exists:
+
+```powershell
+# Test a raw token directly (works before any account is onboarded):
+npm run test:tiktok -- --access-token "act.<long...>"
+
+# Or test an already-onboarded client's stored token:
+npm run test:tiktok -- --client symmetry-esthetics
+```
+
+It calls `/v2/user/info/` (follower/following/likes/video counts) and `/v2/video/list/` (recent videos with per-video view/like/comment/share counts) and prints what came back. Any scope-withheld stat shows as `(withheld)` rather than `0`. Add `--max-videos <n>` to cap how many videos it pulls (default 10). An expired token surfaces a clean `access_token_invalid` error — re-mint and retry.
+
 ## Common gotchas
 
 | Symptom | Cause + fix |
