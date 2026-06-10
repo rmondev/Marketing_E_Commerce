@@ -31,9 +31,17 @@ export const TIKTOK_SCOPES = [
 
 // ─── PKCE helpers ──────────────────────────────────────────────────────────
 
-// 96 bytes → 128-char base64url string (within RFC 7636's 43-128 range).
+// 43-char pure-alphanumeric verifier — the RFC 7636 minimum length and
+// what most TikTok-related PKCE examples actually use in practice. Longer
+// verifiers are spec-compliant but have been observed to trigger validation
+// quirks in TikTok's sandbox parser; the minimum is the safest.
 export function generateCodeVerifier(): string {
-  return base64UrlEncode(randomBytes(96));
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const buf = randomBytes(43);
+  let out = "";
+  for (const b of buf) out += alphabet[b % alphabet.length];
+  return out;
 }
 
 export function deriveCodeChallenge(verifier: string): string {
@@ -56,11 +64,14 @@ function base64UrlEncode(buf: Buffer): string {
 
 // ─── Authorization URL ─────────────────────────────────────────────────────
 
+export type PkceMethod = "S256" | "plain";
+
 export function buildAuthorizationUrl(input: {
   clientKey: string;
   redirectUri: string;
   codeChallenge: string;
   state: string;
+  method?: PkceMethod;
   scopes?: readonly string[];
 }): string {
   const url = new URL(`${AUTH_HOST}/v2/auth/authorize/`);
@@ -70,7 +81,7 @@ export function buildAuthorizationUrl(input: {
   url.searchParams.set("redirect_uri", input.redirectUri);
   url.searchParams.set("state", input.state);
   url.searchParams.set("code_challenge", input.codeChallenge);
-  url.searchParams.set("code_challenge_method", "S256");
+  url.searchParams.set("code_challenge_method", input.method ?? "S256");
   return url.toString();
 }
 
@@ -159,13 +170,27 @@ export async function refreshTokens(input: {
 async function postToTokenEndpoint(
   body: URLSearchParams,
 ): Promise<TikTokTokens> {
+  const bodyString = body.toString();
+  if (process.env["TIKTOK_DEBUG"] === "1") {
+    const redacted = bodyString.replace(
+      /client_secret=[^&]+/,
+      "client_secret=***",
+    );
+    console.log(`  [DEBUG] POST ${API_HOST}/v2/oauth/token/`);
+    console.log(`  [DEBUG] body:`, redacted);
+  }
+  // String body with bare Content-Type. TikTok's sandbox rejected
+  // `application/x-www-form-urlencoded;charset=UTF-8` as malformed, and
+  // also rejected URLSearchParams-direct (which fetch wraps with the same
+  // charset suffix). Bare type was the only variant that parsed cleanly
+  // — though it still hit the PKCE validator error downstream.
   const res = await fetch(`${API_HOST}/v2/oauth/token/`, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "Cache-Control": "no-cache",
     },
-    body: body.toString(),
+    body: bodyString,
   });
   const raw = (await res.json().catch(() => null)) as unknown;
   if (!res.ok) {

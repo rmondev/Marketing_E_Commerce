@@ -133,6 +133,35 @@ Expected flow:
 
 If any step fails before G1 lands, you'll see something other than what's above — that's expected, code isn't there yet.
 
+## Workaround: manual token paste (current default)
+
+The full OAuth + PKCE onboarding flow shipped in G1 is hitting a sandbox-side validator bug as of 2026-06-10. Our PKCE pair is mathematically correct (verified against RFC 7636's published test vector), but TikTok's `/v2/oauth/token/` endpoint rejects the exchange with `invalid_request: Code verifier or code challenge is invalid` regardless of verifier length (43/64/128), character set (base64url vs alphanumeric), or Content-Type variant. A support ticket is open with the `log_id` values; until that's resolved, onboarding accepts pre-minted tokens via flags:
+
+```powershell
+npm run client:platform:add -- --client symmetry-esthetics --platform tiktok `
+  --tiktok-access-token "act.<long...>" `
+  --tiktok-refresh-token "rft.<long...>"
+```
+
+### How to obtain the tokens
+
+You need an access_token + refresh_token pair for the target TikTok account (Symmetry in our case). Options:
+
+1. **TikTok's developer-portal "Try API" tool** — some app detail pages have a section that completes OAuth + token exchange on TikTok's own infrastructure (bypassing whatever's broken about cross-origin/PKCE exchange to our app). Look for a "Test API" / "Sandbox Test" / "OAuth Playground" button.
+2. **Postman + TikTok's published collection** — TikTok publishes a Postman collection for Login Kit. Import it, configure your `CLIENT_KEY` / `CLIENT_SECRET` / `REDIRECT_URI`, run the OAuth flow inside Postman. Postman handles PKCE itself and seems immune to the bug. You'll have `access_token` and `refresh_token` in the response.
+3. **A different OAuth client library** (e.g. simple-oauth2, node-tiktok-api-v2 if it exists) that has its own PKCE implementation. If theirs works where ours doesn't, the bug is specific to a request-shape detail we're missing.
+
+Whichever path you use, **the target account (Symmetry) must complete the consent screen** during OAuth, and the resulting tokens carry her authorization — they're not a developer-side artifact.
+
+### After the workaround
+
+When tokens are pasted via flags:
+- The audit assumes 24h access-token lifetime and 365d refresh-token lifetime. Both are reset by `token:refresh` if you re-mint.
+- `credentials.manual_token=true` is set in the JSON blob so the audit can warn the operator that this account was bootstrapped via the workaround.
+- The audit's auto-refresh path (G3) will use the `refresh_token` normally — TikTok's `/v2/oauth/token/?grant_type=refresh_token` endpoint doesn't use PKCE and works correctly in our testing.
+
+The workaround is invisible to G2-G6 — the audit reads the same credentials shape regardless of whether tokens came from OAuth or manual paste.
+
 ## Common gotchas
 
 | Symptom | Cause + fix |

@@ -31,8 +31,19 @@ import {
   generateCodeVerifier,
   generateState,
   TikTokAuthError,
+  type PkceMethod,
   type TikTokTokens,
 } from "./oauth.js";
+
+// Toggle for diagnosing TikTok sandbox PKCE issues. "plain" sends the
+// verifier as the challenge (no SHA-256), which TikTok validates by
+// equality. Less secure than S256 but only meaningful for an MITM on
+// the redirect URI — since our redirect is localhost only, that's the
+// operator's own machine. Safe to use during debugging or as a permanent
+// fallback if TikTok's sandbox S256 validation stays broken.
+const PKCE_METHOD: PkceMethod =
+  process.env["TIKTOK_PKCE_METHOD"] === "plain" ? "plain" : "S256";
+const DEBUG = process.env["TIKTOK_DEBUG"] === "1";
 
 const CALLBACK_PATH = "/oauth/tiktok/callback";
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
@@ -48,8 +59,20 @@ const userInfoSchema = z.object({
 });
 
 export async function onboardTikTok(
-  _input: PlatformOnboardingInput,
+  input: PlatformOnboardingInput,
 ): Promise<PlatformOnboardingResult> {
+  // ─── Workaround path: pre-existing tokens supplied via flags ─────────────
+  // The OAuth + PKCE flow is hitting a sandbox-side validator bug — we send a
+  // mathematically-correct PKCE pair (RFC 7636 verified) but TikTok rejects
+  // it as "invalid". Until the bug is fixed or our support ticket is
+  // answered, operators can paste tokens minted elsewhere (TikTok's
+  // developer portal "Try API" tool, Postman, etc.) and skip OAuth.
+  const flagAccessToken = input.flagValues["tiktokAccessToken"];
+  const flagRefreshToken = input.flagValues["tiktokRefreshToken"];
+  if (flagAccessToken !== undefined && flagAccessToken !== "") {
+    return runManualTokenWorkaround(flagAccessToken, flagRefreshToken);
+  }
+
   if (
     env.TIKTOK_CLIENT_KEY === undefined ||
     env.TIKTOK_CLIENT_KEY === "" ||
@@ -65,14 +88,24 @@ export async function onboardTikTok(
   const redirectUri = env.TIKTOK_REDIRECT_URI ?? DEFAULT_REDIRECT_URI;
 
   const codeVerifier = generateCodeVerifier();
-  const codeChallenge = deriveCodeChallenge(codeVerifier);
+  const codeChallenge =
+    PKCE_METHOD === "plain" ? codeVerifier : deriveCodeChallenge(codeVerifier);
   const state = generateState();
   const authUrl = buildAuthorizationUrl({
     clientKey,
     redirectUri,
     codeChallenge,
     state,
+    method: PKCE_METHOD,
   });
+
+  if (DEBUG) {
+    console.log("\n  [DEBUG] PKCE method:    ", PKCE_METHOD);
+    console.log("  [DEBUG] code_verifier:  ", codeVerifier);
+    console.log("  [DEBUG] code_challenge: ", codeChallenge);
+    console.log("  [DEBUG] verifier length:", codeVerifier.length);
+    console.log("  [DEBUG] challenge length:", codeChallenge.length);
+  }
 
   const parsedRedirect = new URL(redirectUri);
   const port = Number(parsedRedirect.port || "80");
@@ -93,6 +126,10 @@ export async function onboardTikTok(
   const { code } = callback;
 
   console.log("\n  Exchanging code for tokens...");
+  if (DEBUG) {
+    console.log("  [DEBUG] sending code_verifier:", codeVerifier);
+    console.log("  [DEBUG] received code:        ", code);
+  }
   let tokens: TikTokTokens;
   try {
     tokens = await exchangeCodeForTokens({
@@ -140,6 +177,68 @@ export async function onboardTikTok(
       scope: tokens.scope,
       display_name: displayName,
       username,
+    }),
+  };
+  if (username !== "") result.display_handle = `@${username}`;
+  return result;
+}
+
+// ─── Manual-token workaround ──────────────────────────────────────────────
+
+async function runManualTokenWorkaround(
+  accessToken: string,
+  refreshToken: string | undefined,
+): Promise<PlatformOnboardingResult> {
+  console.log("\n  Manual token mode — skipping OAuth (workaround for sandbox PKCE bug).");
+  if (refreshToken === undefined || refreshToken === "") {
+    console.log(
+      "  ⚠ No --tiktok-refresh-token provided. The access token will expire in ~24h with no way to renew automatically.",
+    );
+  }
+
+  // Verify the token works and capture the canonical open_id + display name.
+  console.log("\n  Fetching user info to validate token...");
+  const userInfo = await fetchUserInfo(accessToken);
+  const displayName = userInfo.display_name ?? userInfo.username ?? userInfo.open_id;
+  const username = userInfo.username ?? "";
+  console.log(
+    `    open_id=${userInfo.open_id}  display_name=${displayName}${
+      username !== "" ? `  @${username}` : ""
+    }`,
+  );
+
+  // Token lifetimes are best-effort assumptions when pasted manually —
+  // standard TikTok access tokens last 24h, refresh tokens 365d, with the
+  // exact issuance time unknown. Use safe estimates; the audit's
+  // ensure-fresh-token pass will refresh proactively as expiry approaches.
+  const now = Date.now();
+  const tokens: TikTokTokens = {
+    access_token: accessToken,
+    refresh_token: refreshToken ?? "",
+    expires_at_iso: new Date(now + 24 * 60 * 60 * 1000).toISOString(),
+    refresh_expires_at_iso: new Date(
+      now + 365 * 24 * 60 * 60 * 1000,
+    ).toISOString(),
+    open_id: userInfo.open_id,
+    scope: "(manual)",
+  };
+
+  console.log("\n  Manual token persisted.");
+  console.log(`    open_id:    ${tokens.open_id}`);
+  console.log(`    expires_at: ${tokens.expires_at_iso} (assumed; may be sooner)`);
+
+  const result: PlatformOnboardingResult = {
+    external_account_id: tokens.open_id,
+    credentials: JSON.stringify({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at_iso: tokens.expires_at_iso,
+      refresh_expires_at_iso: tokens.refresh_expires_at_iso,
+      open_id: tokens.open_id,
+      scope: tokens.scope,
+      display_name: displayName,
+      username,
+      manual_token: true,
     }),
   };
   if (username !== "") result.display_handle = `@${username}`;
