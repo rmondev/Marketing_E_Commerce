@@ -1,23 +1,30 @@
-// TikTok OAuth 2.0 + PKCE helpers.
+// TikTok OAuth 2.0 token helpers (protocol layer — URL building, code/refresh
+// exchange, expiry check). The interactive browser flow lives in oauth-flow.ts.
 //
-// TikTok's Login Kit uses Authorization Code + PKCE (RFC 7636). The flow:
-//   1. Generate a random code_verifier and its SHA-256 code_challenge.
-//   2. Direct the user to TikTok's auth URL with the code_challenge.
-//   3. User authorizes; TikTok redirects to our localhost callback with a code.
-//   4. Exchange the code + code_verifier for access_token + refresh_token.
-//   5. Store tokens; refresh on the access_token's 24-hour expiry using the
-//      365-day refresh_token (which itself rotates on every refresh).
+// Flow type: CONFIDENTIAL WEB. TikTok Login Kit *web* apps authenticate with
+// client_key + client_secret and DO NOT use PKCE — per TikTok's token docs,
+// code_verifier is "Required for mobile and desktop app only". The web flow:
+//   1. Direct the user to TikTok's auth URL (no code_challenge).
+//   2. User authorizes; TikTok redirects to the registered redirect URI w/ a code.
+//   3. Exchange the code + client_secret for access_token + refresh_token.
+//   4. Refresh on the access_token's 24h expiry using the 365d refresh_token
+//      (which itself rotates on every refresh).
 //
-// All endpoints target the v2 OAuth surface (open.tiktokapis.com), distinct
-// from the v1 endpoints that were deprecated in 2024.
+// PKCE remains supported by buildAuthorizationUrl/exchangeCodeForTokens (pass a
+// codeChallenge / codeVerifier) for desktop/mobile app types, but the web app
+// type this project uses doesn't need it. Endpoints target the v2 OAuth surface.
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { z } from "zod";
 
 const AUTH_HOST = "https://www.tiktok.com";
 const API_HOST = "https://open.tiktokapis.com";
 
-export const DEFAULT_REDIRECT_URI = "http://localhost:3001/oauth/tiktok/callback";
+// Default redirect for the confidential web flow — a public https page the
+// operator controls (TikTok's Web platform rejects localhost). Override with
+// TIKTOK_REDIRECT_URI in .env.local.
+export const DEFAULT_REDIRECT_URI =
+  "https://rmondev.github.io/analyticsaudit-policies/";
 
 // Scopes the audit needs. user.info.basic is implicit when Login Kit is
 // configured; listing it explicitly anyway is harmless and makes the
@@ -29,24 +36,7 @@ export const TIKTOK_SCOPES = [
   "video.list",
 ] as const;
 
-// ─── PKCE helpers ──────────────────────────────────────────────────────────
-
-// 43-char pure-alphanumeric verifier — the RFC 7636 minimum length and
-// what most TikTok-related PKCE examples actually use in practice. Longer
-// verifiers are spec-compliant but have been observed to trigger validation
-// quirks in TikTok's sandbox parser; the minimum is the safest.
-export function generateCodeVerifier(): string {
-  const alphabet =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  const buf = randomBytes(43);
-  let out = "";
-  for (const b of buf) out += alphabet[b % alphabet.length];
-  return out;
-}
-
-export function deriveCodeChallenge(verifier: string): string {
-  return base64UrlEncode(createHash("sha256").update(verifier).digest());
-}
+// ─── State / encoding helpers ───────────────────────────────────────────────
 
 // CSRF guard — round-trips through the auth URL's `state` param. 32 bytes
 // of entropy is plenty.
@@ -64,15 +54,14 @@ function base64UrlEncode(buf: Buffer): string {
 
 // ─── Authorization URL ─────────────────────────────────────────────────────
 
-export type PkceMethod = "S256" | "plain";
-
 export function buildAuthorizationUrl(input: {
   clientKey: string;
   redirectUri: string;
-  codeChallenge: string;
   state: string;
-  method?: PkceMethod;
   scopes?: readonly string[];
+  // PKCE S256 challenge. OMIT for the confidential web flow (the default);
+  // include only for a desktop/mobile (public-client) app type.
+  codeChallenge?: string;
 }): string {
   const url = new URL(`${AUTH_HOST}/v2/auth/authorize/`);
   url.searchParams.set("client_key", input.clientKey);
@@ -80,8 +69,10 @@ export function buildAuthorizationUrl(input: {
   url.searchParams.set("scope", (input.scopes ?? TIKTOK_SCOPES).join(","));
   url.searchParams.set("redirect_uri", input.redirectUri);
   url.searchParams.set("state", input.state);
-  url.searchParams.set("code_challenge", input.codeChallenge);
-  url.searchParams.set("code_challenge_method", input.method ?? "S256");
+  if (input.codeChallenge !== undefined) {
+    url.searchParams.set("code_challenge", input.codeChallenge);
+    url.searchParams.set("code_challenge_method", "S256");
+  }
   return url.toString();
 }
 
@@ -136,8 +127,9 @@ export async function exchangeCodeForTokens(input: {
   clientKey: string;
   clientSecret: string;
   code: string;
-  codeVerifier: string;
   redirectUri: string;
+  // Only for PKCE (desktop/mobile) app types. Omit for the confidential web flow.
+  codeVerifier?: string;
 }): Promise<TikTokTokens> {
   const body = new URLSearchParams({
     client_key: input.clientKey,
@@ -145,8 +137,10 @@ export async function exchangeCodeForTokens(input: {
     code: input.code,
     grant_type: "authorization_code",
     redirect_uri: input.redirectUri,
-    code_verifier: input.codeVerifier,
   });
+  if (input.codeVerifier !== undefined && input.codeVerifier !== "") {
+    body.set("code_verifier", input.codeVerifier);
+  }
   return postToTokenEndpoint(body);
 }
 
@@ -193,6 +187,10 @@ async function postToTokenEndpoint(
     body: bodyString,
   });
   const raw = (await res.json().catch(() => null)) as unknown;
+  if (process.env["TIKTOK_DEBUG"] === "1") {
+    console.log(`  [DEBUG] HTTP ${res.status}`);
+    console.log(`  [DEBUG] response:`, JSON.stringify(raw).slice(0, 400));
+  }
   if (!res.ok) {
     const parsedErr = errorResponseSchema.safeParse(raw);
     if (parsedErr.success) {
