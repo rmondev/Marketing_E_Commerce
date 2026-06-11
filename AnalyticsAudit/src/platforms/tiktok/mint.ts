@@ -21,6 +21,7 @@
 import { Command } from "commander";
 import { exec } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createInterface } from "node:readline/promises";
 import { URL } from "node:url";
 import { env } from "../../core/lib/env.js";
 import { getUserInfo, TikTokApiError } from "./api.js";
@@ -47,6 +48,10 @@ program
     "--no-pkce",
     "Disable PKCE (confidential web flow). NOTE: TikTok's authorize endpoint for THIS app requires code_challenge, so --no-pkce fails at authorize with a 'code_challenge' error. Kept only for experimentation; PKCE (S256) is the default and is required here.",
   )
+  .option(
+    "--redirect <uri>",
+    "Override the redirect URI. For the Web flow use a public https URI registered under the Web platform (TikTok's Web platform does NOT allow localhost). When the redirect host isn't localhost/127.0.0.1, mint can't auto-catch the code, so it prompts you to paste it from the browser's address bar.",
+  )
   .option("--debug", "Print the exact request body (secret redacted) and the full raw response.")
   .option(
     "--no-exchange",
@@ -57,6 +62,7 @@ program.parse();
 
 const opts = program.opts() as {
   pkce?: boolean;
+  redirect?: string;
   debug: boolean;
   exchange: boolean;
   browser: boolean;
@@ -79,7 +85,9 @@ if (
 }
 const clientKey = env.TIKTOK_CLIENT_KEY;
 const clientSecret = env.TIKTOK_CLIENT_SECRET;
-const redirectUri = env.TIKTOK_REDIRECT_URI ?? DEFAULT_REDIRECT_URI;
+const redirectUri = opts.redirect ?? env.TIKTOK_REDIRECT_URI ?? DEFAULT_REDIRECT_URI;
+const redirectHost = new URL(redirectUri).hostname;
+const isLoopback = redirectHost === "localhost" || redirectHost === "127.0.0.1";
 
 // Confidential web flow (default): authenticate with client_secret, no PKCE.
 // --pkce switches to the S256 code_verifier/challenge flow (mobile/desktop).
@@ -99,18 +107,22 @@ if (usePkce) {
 }
 const authUrl = authUrlObj.toString();
 
-const parsedRedirect = new URL(redirectUri);
-const port = Number(parsedRedirect.port || "80");
-if (!Number.isInteger(port) || port < 1 || port > 65535) {
-  console.error(`Invalid port in redirect URI: ${redirectUri}`);
-  process.exit(1);
+// Port only matters for the loopback callback server. A non-loopback redirect
+// (Web flow) is captured by paste instead.
+let port = 0;
+if (isLoopback) {
+  port = Number(new URL(redirectUri).port || "80");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`Invalid port in redirect URI: ${redirectUri}`);
+    process.exit(1);
+  }
 }
 
 console.log("\n  TikTok token mint");
 console.log(
   `  flow:          ${usePkce ? "PKCE S256 (mobile/desktop-style)" : "confidential web — client_secret, no PKCE"}`,
 );
-console.log(`  redirect URI:  ${redirectUri}`);
+console.log(`  redirect URI:  ${redirectUri}${isLoopback ? "" : "  (paste-the-code mode)"}`);
 if (usePkce) {
   console.log(`  code_verifier: ${codeVerifier}`);
   console.log(`  code_challenge: ${codeChallenge}`);
@@ -120,7 +132,12 @@ console.log("  Log in as the TARGET account (the one you want to audit) and");
 console.log("  click Authorize. If the browser doesn't open, paste this URL:");
 console.log(`\n  ${authUrl}\n`);
 
-const code = await runCallbackServer(port, state, opts.browser ? authUrl : null);
+// Loopback redirect → catch the code with a local server. Otherwise (Web flow
+// with a public https redirect) → open the browser and prompt for the code
+// from the redirected URL's address bar.
+const code = isLoopback
+  ? await runCallbackServer(port, state, opts.browser ? authUrl : null)
+  : await captureCodeByPaste(authUrl, state, opts.browser);
 console.log(`\n  Got authorization code (len=${code.length}).`);
 
 // --no-exchange: hand off to an external client (Thunder Client / Postman /
@@ -281,6 +298,73 @@ function readTokenSuccess(raw: Record<string, unknown> | null): TokenSuccess | n
     };
   }
   return null;
+}
+
+// ─── Paste-the-code capture (non-loopback redirect) ─────────────────────────
+// For a Web-flow public https redirect, TikTok sends the code to a page we
+// don't control a server on. The operator copies the redirected URL (or just
+// the code) from the browser's address bar and pastes it here.
+async function captureCodeByPaste(
+  urlToOpen: string,
+  expectedState: string,
+  openInBrowser: boolean,
+): Promise<string> {
+  if (openInBrowser) {
+    openBrowser(urlToOpen).catch((err) =>
+      console.warn(`  (browser open failed: ${err.message})`),
+    );
+  }
+  console.log(
+    "  After you Authorize, the browser lands on your redirect page with\n" +
+      "  ?code=...&state=... in the address bar. Copy that whole URL (or just the\n" +
+      "  code value) and paste it below.\n",
+  );
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const answer = (await rl.question("  Paste redirected URL or code: ")).trim();
+      if (answer === "") continue;
+
+      let code = answer;
+      // If they pasted a full URL, pull code + verify state.
+      if (answer.includes("code=") || answer.startsWith("http")) {
+        try {
+          const u = new URL(answer);
+          const c = u.searchParams.get("code");
+          const s = u.searchParams.get("state");
+          const err = u.searchParams.get("error");
+          if (err !== null) {
+            console.error(`  Authorization error in URL: ${err}`);
+            continue;
+          }
+          if (c === null) {
+            console.error("  No 'code' found in that URL — try again.");
+            continue;
+          }
+          if (s !== null && s !== expectedState) {
+            console.error("  State mismatch (possible CSRF / stale URL) — re-run mint and retry.");
+            process.exit(1);
+          }
+          code = c;
+        } catch {
+          // Not a parseable URL; treat the raw string as the code.
+          code = answer;
+        }
+      }
+      // TikTok codes arrive URL-encoded in the address bar (e.g. %2A, %21).
+      // Decode so the exchange sends the raw code.
+      try {
+        code = decodeURIComponent(code);
+      } catch {
+        /* leave as-is if it wasn't encoded */
+      }
+      return code;
+    }
+    console.error("  No code provided after 3 tries. Aborting.");
+    process.exit(1);
+  } finally {
+    rl.close();
+  }
 }
 
 // ─── Local callback server ──────────────────────────────────────────────────
