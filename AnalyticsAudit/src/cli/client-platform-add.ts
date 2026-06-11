@@ -28,7 +28,7 @@ program
   .option("--facebook-page-id <id>", "[Facebook Page] Page ID")
   .option("--facebook-page-token <token>", "[Facebook Page] Page Access Token")
   .option("--tiktok-handle <handle>", "[TikTok] @username (unused; reserved for legacy flag compatibility)")
-  .option("--tiktok-access-token <token>", "[TikTok] Access Token (manual-token workaround for the OAuth flow)")
+  .option("--tiktok-access-token <token>", "[TikTok] Paste a pre-minted access token instead of running the browser OAuth flow")
   .option("--tiktok-refresh-token <token>", "[TikTok] Refresh Token (recommended alongside --tiktok-access-token)");
 
 program.parse();

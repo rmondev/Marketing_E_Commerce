@@ -392,7 +392,7 @@ function renderAccountSection(
   if (account.manual_token) {
     lines.push("");
     lines.push(
-      "*This account was bootstrapped via the manual-token workaround (OAuth sandbox bug). Token lifetimes are best-effort estimates; see docs/TIKTOK_SETUP.md.*",
+      "*This account was onboarded from a pasted token (manual-token mode), so token lifetimes are best-effort estimates. See docs/TIKTOK_SETUP.md.*",
     );
   }
   return lines.join("\n");

@@ -2,9 +2,8 @@
 //
 // Two ways to supply a token:
 //
-//   1. Directly — works BEFORE any TikTok account is onboarded, which is the
-//      common case while the OAuth sandbox PKCE bug is open and tokens are
-//      minted via Postman / the portal "Try API" tool (see docs/TIKTOK_SETUP.md):
+//   1. Directly — useful before a TikTok account is onboarded, or to test a
+//      freshly minted token (e.g. from `npm run tiktok:mint`):
 //        npm run test:tiktok -- --access-token "act.xxxxx"
 //
 //   2. From an onboarded client's stored credentials:

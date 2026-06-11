@@ -126,8 +126,8 @@ export const VIDEO_LIST_MAX_PAGE = 20;
 
 // JSON shape persisted into platform_accounts.credentials by onboarding.ts.
 // Mirrored here so the audit (G3) and any token-refresh code parse a typed
-// blob instead of a bag of `unknown`. `manual_token` marks accounts
-// bootstrapped via the OAuth-bug workaround (see docs/TIKTOK_SETUP.md).
+// blob instead of a bag of `unknown`. `manual_token` marks accounts onboarded
+// from a pasted token rather than the browser OAuth flow (see docs/TIKTOK_SETUP.md).
 export type TikTokCredentials = {
   access_token: string;
   refresh_token: string;
