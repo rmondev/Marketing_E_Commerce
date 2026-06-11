@@ -25,14 +25,14 @@ import { URL } from "node:url";
 import { env } from "../../core/lib/env.js";
 import { getUserInfo, TikTokApiError } from "./api.js";
 import {
-  buildAuthorizationUrl,
   DEFAULT_REDIRECT_URI,
   deriveCodeChallenge,
   generateCodeVerifier,
   generateState,
-  type PkceMethod,
+  TIKTOK_SCOPES,
 } from "./oauth.js";
 
+const AUTH_URL = "https://www.tiktok.com/v2/auth/authorize/";
 const TOKEN_URL = "https://open.tiktokapis.com/v2/oauth/token/";
 const CALLBACK_PATH = "/oauth/tiktok/callback";
 const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
@@ -44,31 +44,24 @@ program
     "Mint a TikTok access/refresh token pair via the browser (OAuth code → token exchange).",
   )
   .option(
-    "--method <s256|plain>",
-    "PKCE challenge method. Default 's256' — TikTok's authorize endpoint REJECTS 'plain' (it returns a code_challenge_method error before issuing a code), so 'plain' is kept only for experimentation.",
-    "s256",
+    "--pkce",
+    "Use PKCE (S256). Default OFF. This app is a confidential WEB client (it has a client_secret); TikTok's docs state code_verifier is 'Required for mobile and desktop app only', so the web flow authenticates with client_secret and NO PKCE. Forcing PKCE on a web app is what produced 'Code verifier or code challenge is invalid'. Enable only to experiment with a desktop/mobile-style flow.",
   )
   .option("--debug", "Print the exact request body (secret redacted) and the full raw response.")
   .option(
     "--no-exchange",
-    "Stop after capturing the code: print the code + code_verifier so you can run the token exchange elsewhere (Thunder Client, Postman, curl). The verifier matches the challenge sent at authorize.",
+    "Stop after capturing the code: print the code (+ code_verifier when --pkce) and the exact token request so you can exchange it elsewhere (Thunder Client, Postman, curl).",
   )
   .option("--no-browser", "Don't auto-open the browser; just print the URL.");
 program.parse();
 
 const opts = program.opts() as {
-  method: string;
+  pkce?: boolean;
   debug: boolean;
   exchange: boolean;
   browser: boolean;
 };
-const method: PkceMethod = opts.method === "plain" ? "plain" : "S256";
-if (method === "plain") {
-  console.warn(
-    "\n  ⚠ TikTok's authorize endpoint rejects code_challenge_method=plain and will\n" +
-      "    fail with a 'code_challenge_method' error before issuing a code. Use S256.",
-  );
-}
+const usePkce = opts.pkce === true;
 
 if (
   env.TIKTOK_CLIENT_KEY === undefined ||
@@ -85,17 +78,23 @@ const clientKey = env.TIKTOK_CLIENT_KEY;
 const clientSecret = env.TIKTOK_CLIENT_SECRET;
 const redirectUri = env.TIKTOK_REDIRECT_URI ?? DEFAULT_REDIRECT_URI;
 
-const codeVerifier = generateCodeVerifier();
-const codeChallenge =
-  method === "plain" ? codeVerifier : deriveCodeChallenge(codeVerifier);
+// Confidential web flow (default): authenticate with client_secret, no PKCE.
+// --pkce switches to the S256 code_verifier/challenge flow (mobile/desktop).
+const codeVerifier = usePkce ? generateCodeVerifier() : "";
+const codeChallenge = usePkce ? deriveCodeChallenge(codeVerifier) : "";
 const state = generateState();
-const authUrl = buildAuthorizationUrl({
-  clientKey,
-  redirectUri,
-  codeChallenge,
-  state,
-  method,
-});
+
+const authUrlObj = new URL(AUTH_URL);
+authUrlObj.searchParams.set("client_key", clientKey);
+authUrlObj.searchParams.set("response_type", "code");
+authUrlObj.searchParams.set("scope", TIKTOK_SCOPES.join(","));
+authUrlObj.searchParams.set("redirect_uri", redirectUri);
+authUrlObj.searchParams.set("state", state);
+if (usePkce) {
+  authUrlObj.searchParams.set("code_challenge", codeChallenge);
+  authUrlObj.searchParams.set("code_challenge_method", "S256");
+}
+const authUrl = authUrlObj.toString();
 
 const parsedRedirect = new URL(redirectUri);
 const port = Number(parsedRedirect.port || "80");
@@ -105,10 +104,14 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 console.log("\n  TikTok token mint");
-console.log(`  PKCE method:   ${method}`);
+console.log(
+  `  flow:          ${usePkce ? "PKCE S256 (mobile/desktop-style)" : "confidential web — client_secret, no PKCE"}`,
+);
 console.log(`  redirect URI:  ${redirectUri}`);
-console.log(`  code_verifier: ${codeVerifier}`);
-console.log(`  code_challenge:${method === "plain" ? " (= verifier)" : ""} ${codeChallenge}`);
+if (usePkce) {
+  console.log(`  code_verifier: ${codeVerifier}`);
+  console.log(`  code_challenge: ${codeChallenge}`);
+}
 console.log("");
 console.log("  Log in as the TARGET account (the one you want to audit) and");
 console.log("  click Authorize. If the browser doesn't open, paste this URL:");
@@ -131,7 +134,7 @@ if (!opts.exchange) {
   console.log(`    code=${code}`);
   console.log(`    grant_type=authorization_code`);
   console.log(`    redirect_uri=${redirectUri}`);
-  console.log(`    code_verifier=${codeVerifier}`);
+  if (usePkce) console.log(`    code_verifier=${codeVerifier}`);
   console.log(
     "\n  In Thunder Client: Method POST, the URL above, Headers tab → add the\n" +
       "  Content-Type, Body tab → 'Form-encode' (x-www-form-urlencoded) → add each\n" +
@@ -145,18 +148,16 @@ if (!opts.exchange) {
 console.log("  Exchanging...\n");
 
 // ─── Token exchange ─────────────────────────────────────────────────────────
-// The exchange request shape is fully constrained by TikTok (verified by
-// probing 2026-06-11): client_secret MUST be in the body (omitting it, or
-// moving it to an HTTP Basic header, yields "request parameters are
-// malformed"), and the Content-Type MUST be a bare "application/x-www-form-
-// urlencoded" with no charset suffix (a suffix, or application/json, is
-// rejected). So this is the one and only valid shape.
+// Request shape (probed 2026-06-11): client_secret MUST be in a bare
+// "application/x-www-form-urlencoded" body (no charset suffix; not JSON; not an
+// HTTP Basic header — all of those return "request parameters are malformed").
 //
-// NOTE: in the sandbox this still returns "Code verifier or code challenge is
-// invalid" even though the PKCE pair is RFC 7636-correct (our derivation
-// matches the spec's published test vector) and the code is sent byte-for-byte
-// as issued. That's a confirmed server-side bug in TikTok's sandbox validator
-// — see the failure message below for the working alternative.
+// PKCE: per TikTok's token-management docs, code_verifier is "Required for
+// mobile and desktop app only". This is a confidential WEB client, so the
+// default flow omits PKCE entirely (no code_challenge at authorize, no
+// code_verifier here) and authenticates with client_secret. Sending a
+// code_verifier on the web flow is what produced "Code verifier or code
+// challenge is invalid". --pkce re-adds it for desktop/mobile-style testing.
 type TokenSuccess = {
   access_token: string;
   refresh_token: string;
@@ -166,14 +167,15 @@ type TokenSuccess = {
   scope: string;
 };
 
-const body = new URLSearchParams({
+const exchangeParams: Record<string, string> = {
   client_key: clientKey,
   client_secret: clientSecret,
   code,
   grant_type: "authorization_code",
   redirect_uri: redirectUri,
-  code_verifier: codeVerifier,
-}).toString();
+};
+if (usePkce) exchangeParams["code_verifier"] = codeVerifier;
+const body = new URLSearchParams(exchangeParams).toString();
 
 if (opts.debug) {
   console.log(`  [debug] POST ${TOKEN_URL}`);
@@ -204,18 +206,20 @@ if (!minted) {
   console.error(
     `  FAIL [${errCode}]${errDesc ? ` ${errDesc}` : ""}${logId ? ` (log_id=${logId})` : ""}`,
   );
-  if (errCode === "invalid_grant" || (errDesc && errDesc.toLowerCase().includes("code"))) {
-    console.error("\n  If this is an expired/invalid code, re-run and click Authorize promptly.");
+  console.error("\n  Exchange failed. Likely causes:");
+  console.error("    • Expired/invalid code → re-run and click Authorize promptly (codes last minutes).");
+  if (usePkce) {
+    console.error(
+      "    • You ran with --pkce. This is a confidential WEB app — drop --pkce so it\n" +
+        "      authenticates with client_secret and no code_verifier (TikTok's docs: code_verifier\n" +
+        "      is 'Required for mobile and desktop app only').",
+    );
+  } else {
+    console.error(
+      "    • 'Code verifier or code challenge is invalid' on the web flow is unexpected —\n" +
+        "      confirm the app is registered as a Web app and this redirect URI is registered.",
+    );
   }
-  console.error(
-    "\n  If this is the 'Code verifier or code challenge is invalid' error, it's the\n" +
-      "  confirmed TikTok SANDBOX bug (the request is correct — verified). Workarounds:\n" +
-      "    • Mint on TikTok's own infra: dev-portal app → sandbox 'Try API' / OAuth\n" +
-      "      playground, OR TikTok's published Postman collection. Then paste the pair:\n" +
-      "        npm run client:platform:add -- --client <client> --platform tiktok \\\n" +
-      "          --tiktok-access-token \"act.xxx\" --tiktok-refresh-token \"rft.xxx\"\n" +
-      "    • Or submit the app for Audit to leave sandbox — the bug appears sandbox-only.",
-  );
   process.exit(1);
 }
 
