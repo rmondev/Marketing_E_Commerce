@@ -44,8 +44,8 @@ program
     "Mint a TikTok access/refresh token pair via the browser (OAuth code → token exchange).",
   )
   .option(
-    "--pkce",
-    "Use PKCE (S256). Default OFF. This app is a confidential WEB client (it has a client_secret); TikTok's docs state code_verifier is 'Required for mobile and desktop app only', so the web flow authenticates with client_secret and NO PKCE. Forcing PKCE on a web app is what produced 'Code verifier or code challenge is invalid'. Enable only to experiment with a desktop/mobile-style flow.",
+    "--no-pkce",
+    "Disable PKCE (confidential web flow). NOTE: TikTok's authorize endpoint for THIS app requires code_challenge, so --no-pkce fails at authorize with a 'code_challenge' error. Kept only for experimentation; PKCE (S256) is the default and is required here.",
   )
   .option("--debug", "Print the exact request body (secret redacted) and the full raw response.")
   .option(
@@ -61,7 +61,10 @@ const opts = program.opts() as {
   exchange: boolean;
   browser: boolean;
 };
-const usePkce = opts.pkce === true;
+// PKCE (S256) is the default: TikTok's authorize endpoint requires
+// code_challenge for this app. --no-pkce sets opts.pkce=false (web flow,
+// disproven — authorize rejects it).
+const usePkce = opts.pkce !== false;
 
 if (
   env.TIKTOK_CLIENT_KEY === undefined ||
