@@ -49,12 +49,17 @@ program
     "s256",
   )
   .option("--debug", "Print the exact request body (secret redacted) and the full raw response.")
+  .option(
+    "--no-exchange",
+    "Stop after capturing the code: print the code + code_verifier so you can run the token exchange elsewhere (Thunder Client, Postman, curl). The verifier matches the challenge sent at authorize.",
+  )
   .option("--no-browser", "Don't auto-open the browser; just print the URL.");
 program.parse();
 
 const opts = program.opts() as {
   method: string;
   debug: boolean;
+  exchange: boolean;
   browser: boolean;
 };
 const method: PkceMethod = opts.method === "plain" ? "plain" : "S256";
@@ -110,7 +115,34 @@ console.log("  click Authorize. If the browser doesn't open, paste this URL:");
 console.log(`\n  ${authUrl}\n`);
 
 const code = await runCallbackServer(port, state, opts.browser ? authUrl : null);
-console.log(`\n  Got authorization code (len=${code.length}). Exchanging...\n`);
+console.log(`\n  Got authorization code (len=${code.length}).`);
+
+// --no-exchange: hand off to an external client (Thunder Client / Postman /
+// curl) for the token exchange. Codes are single-use and expire within
+// minutes, so run the exchange immediately. POST these as a bare
+// application/x-www-form-urlencoded body to the token URL below.
+if (!opts.exchange) {
+  console.log("\n  ── Exchange these elsewhere (code expires in minutes — go now) ──");
+  console.log(`  POST ${TOKEN_URL}`);
+  console.log(`  Header  Content-Type: application/x-www-form-urlencoded`);
+  console.log("  Body (x-www-form-urlencoded):");
+  console.log(`    client_key=${clientKey}`);
+  console.log(`    client_secret=${clientSecret}`);
+  console.log(`    code=${code}`);
+  console.log(`    grant_type=authorization_code`);
+  console.log(`    redirect_uri=${redirectUri}`);
+  console.log(`    code_verifier=${codeVerifier}`);
+  console.log(
+    "\n  In Thunder Client: Method POST, the URL above, Headers tab → add the\n" +
+      "  Content-Type, Body tab → 'Form-encode' (x-www-form-urlencoded) → add each\n" +
+      "  key=value pair above. Send. On success copy access_token + refresh_token into:\n" +
+      "    npm run client:platform:add -- --client <client> --platform tiktok \\\n" +
+      "      --tiktok-access-token \"act.xxx\" --tiktok-refresh-token \"rft.xxx\"",
+  );
+  process.exit(0);
+}
+
+console.log("  Exchanging...\n");
 
 // ─── Token exchange ─────────────────────────────────────────────────────────
 // The exchange request shape is fully constrained by TikTok (verified by
